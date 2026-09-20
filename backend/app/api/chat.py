@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.models.user import User
 from app.schemas.chat import ChatRequest, ChatResponse, ChatSource
 from app.services.auth import get_current_user
+from app.services.chat_history import create_chat_history_service
 from app.services.rag import create_rag_service
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ async def chat(
             min_similarity=request.min_similarity,
         )
 
-        return ChatResponse(
+        response = ChatResponse(
             question=request.question,
             answer=result["answer"],
             sources=[ChatSource(**source) for source in result["sources"]],
@@ -82,3 +83,34 @@ async def chat(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"RAG pipeline failed: {str(e)}",
         )
+
+    # --- Persist the exchange (additive; requires an owned session_id) ---
+    # Runs only after a successful RAG result. A failed/foreign session_id is
+    # logged and ignored so history problems never break the answer flow.
+    if request.session_id is not None:
+        try:
+            history_service = create_chat_history_service(db)
+            saved = history_service.record_exchange(
+                session_id=request.session_id,
+                user_id=current_user.id,
+                question=request.question,
+                answer=result["answer"],
+            )
+            if saved is None:
+                logger.warning(
+                    "Chat history save skipped: session %s not found or not owned "
+                    "by user %s",
+                    request.session_id,
+                    current_user.id,
+                )
+            else:
+                logger.info(
+                    "Chat exchange stored in session %s (user %s)",
+                    request.session_id,
+                    current_user.id,
+                )
+        except Exception as e:
+            # History must never break answering.
+            logger.error(f"Failed to store chat exchange: {e}", exc_info=True)
+
+    return response

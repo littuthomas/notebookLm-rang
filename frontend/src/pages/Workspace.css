@@ -1,0 +1,749 @@
+/* ============================================
+   RAG Workspace — main authenticated page.
+   Matches the homepage/auth design tokens defined
+   in index.css (--accent, --border, --bg-soft, …).
+   Reuses shared classes from App.css (.btn, .logo,
+   .logo-mark) and Signup.css (.form-banner,
+   .form-banner-error) — both are always bundled,
+   so reuse is safe and avoids duplication.
+   ============================================ */
+
+/* ---------- Page frame ---------- */
+
+.ws-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--bg-soft);
+}
+
+/* ---------- Header ---------- */
+
+.ws-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+
+.ws-header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 60px;
+  padding: 0 24px;
+  max-width: 1280px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.ws-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.ws-username {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-strong);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  padding: 5px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.ws-logout {
+  padding: 7px 14px;
+  font-size: 14px;
+}
+
+/* ---------- Body: sidebar + main ---------- */
+
+.ws-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  max-width: 1280px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ---------- Sidebar: My Documents ---------- */
+
+.ws-sidebar {
+  flex-shrink: 0;
+  width: 320px;
+  padding: 24px 20px 32px;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ws-sidebar-head h2 {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.ws-sidebar-count {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--text);
+  opacity: 0.75;
+}
+
+/* ---------- Upload control ---------- */
+
+.ws-file-input {
+  /* The real input is hidden — the styled label opens the file picker. */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.ws-upload-btn {
+  width: 100%;
+}
+
+.ws-btn-disabled {
+  opacity: 0.75;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.ws-upload-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.7;
+  text-align: center;
+}
+
+.ws-upload-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ws-upload-status svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.ws-status-success {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #15803d;
+}
+
+.ws-status-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+}
+
+/* ---------- Document list ---------- */
+
+.ws-doc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.ws-doc-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ws-doc-item:hover {
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-sm);
+}
+
+.ws-doc-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ws-doc-info {
+  min-width: 0;
+}
+
+.ws-doc-id {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-doc-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.8;
+}
+
+.ws-doc-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.ws-doc-empty svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  opacity: 0.7;
+}
+
+.ws-doc-error {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+/* ---------- Main area: Ask your documents ---------- */
+
+.ws-main {
+  flex: 1;
+  min-width: 0;
+  padding: 32px 32px 56px;
+}
+
+.ws-main > h1 {
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.ws-main-subtitle {
+  margin-top: 6px;
+  font-size: 15px;
+  color: var(--text);
+  max-width: 640px;
+}
+
+.ws-ask-form {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 720px;
+}
+
+.ws-question {
+  width: 100%;
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text-strong);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  resize: vertical;
+  min-height: 76px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ws-question::placeholder {
+  color: var(--text);
+  opacity: 0.55;
+}
+
+.ws-question:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(109, 40, 217, 0.14);
+}
+
+.ws-question:disabled {
+  background: var(--bg-soft);
+  opacity: 0.8;
+}
+
+.ws-ask-btn {
+  align-self: flex-start;
+}
+
+/* ---------- Answer ---------- */
+
+.ws-answer {
+  margin-top: 28px;
+  max-width: 720px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px 24px;
+  box-shadow: var(--shadow-sm);
+}
+
+.ws-answer-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ws-answer-head h2 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.ws-answer-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.ws-badge-missing {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.ws-model {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.ws-answer-text {
+  margin-top: 14px;
+  font-size: 15px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* "No relevant information found" variant */
+.ws-answer-missing {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.ws-answer-missing .ws-answer-text {
+  color: #92400e;
+}
+
+/* ---------- Sources / citations ---------- */
+
+.ws-sources {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.ws-sources h3 {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text);
+}
+
+.ws-source-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ws-source-item {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft);
+}
+
+.ws-source-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ws-source-doc {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-strong);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-source-chunk {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.85;
+}
+
+.ws-source-score {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.ws-source-snippet {
+  margin: 8px 0 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--accent-border);
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+/* ---------- Empty chat state ---------- */
+
+.ws-chat-empty {
+  margin-top: 40px;
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 44px 24px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 14px;
+  color: var(--text);
+}
+
+.ws-chat-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  margin-bottom: 14px;
+}
+
+.ws-chat-empty p {
+  font-size: 15px;
+  color: var(--text-strong);
+}
+
+.ws-chat-empty-hint {
+  margin-top: 6px;
+  font-size: 13.5px !important;
+  color: var(--text) !important;
+}
+
+/* ---------- Spinner (inline SVG rotation) ---------- */
+
+.ws-spin {
+  animation: ws-rotate 0.8s linear infinite;
+}
+
+@keyframes ws-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ============================================
+   Responsive
+   ============================================ */
+
+@media (max-width: 880px) {
+  .ws-body {
+    flex-direction: column;
+  }
+
+  .ws-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 20px;
+  }
+
+  .ws-doc-list {
+    max-height: 260px;
+  }
+
+  .ws-main {
+    padding: 24px 20px 48px;
+  }
+
+  .ws-username {
+    max-width: 140px;
+  }
+}
+
+/* ---------- Sidebar: Chats (chat history) ---------- */
+
+.ws-chats-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ws-chats-head h2 {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.ws-new-chat-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.ws-chat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.ws-chat-item {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ws-chat-item:hover {
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-sm);
+}
+
+.ws-chat-item-active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.ws-chat-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0 10px 12px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.ws-chat-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ws-chat-info {
+  min-width: 0;
+}
+
+.ws-chat-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-chat-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.8;
+}
+
+.ws-chat-delete {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  margin: 6px 6px 6px 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.ws-chat-item:hover .ws-chat-delete {
+  opacity: 0.7;
+}
+
+.ws-chat-delete:hover {
+  opacity: 1 !important;
+  color: #b91c1c;
+  background: rgba(185, 28, 28, 0.08);
+}
+
+.ws-chat-list-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--text);
+  opacity: 0.85;
+}
+
+.ws-chats-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.ws-chats-error {
+  background: rgba(185, 28, 28, 0.06);
+  color: #b91c1c;
+}
+
+/* ---------- Main area: conversation ---------- */
+
+.ws-active-session {
+  margin-top: -6px;
+  font-size: 13px;
+  color: var(--text);
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-session-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  font-size: 14px;
+  color: var(--text);
+}
+
+.ws-conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.ws-msg-user {
+  align-self: flex-end;
+  max-width: 78%;
+  padding: 10px 14px;
+  border-radius: 14px 14px 4px 14px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+}
+
+.ws-msg-user .ws-msg-text {
+  font-size: 14px;
+  color: var(--text-strong);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ws-msg-assistant {
+  align-self: stretch;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+}
+
+.ws-msg-streaming {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text);
+  opacity: 0.8;
+}

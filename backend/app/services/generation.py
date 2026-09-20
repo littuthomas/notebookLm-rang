@@ -225,20 +225,28 @@ class GenerationService:
     def _generate_gemini(self, prompt: str) -> str:
         """Generate a completion using the Gemini API (non-streaming)."""
         from google import genai
+        from google.genai import types
 
         if not settings.GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY not configured")
 
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
+        # Typed config with AFC disabled: this pipeline never passes tools, so
+        # automatic function calling is dead weight. With it disabled the SDK
+        # takes the direct request path and skips its AFC wrapper, which logs
+        # a "Direct use of automatic function calling" warning.
         response = client.models.generate_content(
             model=self._model,
             contents=prompt,
-            config={
-                "system_instruction": SYSTEM_INSTRUCTION,
-                "temperature": self._temperature,
-                "max_output_tokens": self._max_output_tokens,
-            },
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=self._temperature,
+                max_output_tokens=self._max_output_tokens,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
+            ),
         )
 
         try:
@@ -255,20 +263,25 @@ class GenerationService:
     async def _stream_gemini(self, prompt: str) -> AsyncIterator[str]:
         """Generate a completion using the Gemini API (streaming)."""
         from google import genai
+        from google.genai import types
 
         if not settings.GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY not configured")
 
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
+        # Typed config with AFC disabled (see _generate_gemini above).
         response = client.models.generate_content_stream(
             model=self._model,
             contents=prompt,
-            config={
-                "system_instruction": SYSTEM_INSTRUCTION,
-                "temperature": self._temperature,
-                "max_output_tokens": self._max_output_tokens,
-            },
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=self._temperature,
+                max_output_tokens=self._max_output_tokens,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
+            ),
         )
 
         yielded_any = False

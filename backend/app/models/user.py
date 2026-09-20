@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import sqlalchemy as sa
 from sqlalchemy import String, Boolean, DateTime
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
@@ -22,6 +22,11 @@ class User(Base):
         server_default=sa.func.now(),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
+    )
+
+    # --- Relationships ---
+    chat_sessions: Mapped[list["ChatSession"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
     )
 
     def to_dict(self) -> dict:

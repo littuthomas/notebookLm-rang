@@ -11,6 +11,15 @@ class ChatRequest(BaseModel):
         description="The question to answer from the indexed documents",
         examples=["What is the capital of France?"],
     )
+    session_id: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional chat session id owned by the caller. When provided, the "
+            "question and the final answer are stored in that session. When "
+            "omitted, the request behaves exactly as before (nothing stored)."
+        ),
+    )
     top_k: int | None = Field(
         default=None,
         ge=1,

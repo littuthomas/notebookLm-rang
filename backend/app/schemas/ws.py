@@ -31,6 +31,16 @@ class WSStartMessage(BaseModel):
             "(defaults to RAG_MIN_SIMILARITY)"
         ),
     )
+    session_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional chat session id owned by the authenticated user. When "
+            "provided, the question and the fully streamed answer are stored "
+            "in that session after the complete message. When omitted, the "
+            "protocol behaves exactly as before (nothing stored)."
+        ),
+    )
 
 
 class WSContextMessage(BaseModel):
