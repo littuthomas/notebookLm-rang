@@ -47,7 +47,7 @@ export default function Settings() {
       rows: [
         { label: 'Answer generation', value: 'Google Gemini' },
         { label: 'Embeddings', value: 'gemini-embedding-2 · 768 dims' },
-        { label: 'Fallback LLM', value: 'NVIDIA Nemotron (if configured)' },
+        { label: 'Fallback LLM', value: 'Nemotron Ultra via OpenRouter (if configured)' },
       ],
     },
     {

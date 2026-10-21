@@ -61,6 +61,19 @@ assert resp.status_code == 200, f"Login failed: {resp.status_code} {resp.json()}
 TOKEN = resp.json()["access_token"]
 print(f"  Login: OK, token length={len(TOKEN)}")
 
+# Notebooks are independent knowledge spaces: chat now REQUIRES an owned
+# notebook_id, so create one for the e2e user and scope every start to it.
+resp = client.post(
+    "/api/notebooks",
+    json={"name": "WS E2E notebook"},
+    headers={"Authorization": f"Bearer {TOKEN}"},
+)
+if resp.status_code not in (200, 201):
+    print(f"  Notebook creation failed: {resp.status_code} {resp.text}")
+    sys.exit(1)
+NOTEBOOK_ID = resp.json()["id"]
+print(f"  Notebook: OK, id={NOTEBOOK_ID}")
+
 
 # ===========================================================================
 # TEST 1: France capital question
@@ -70,7 +83,7 @@ print("TEST 1: 'What is the capital of France?'")
 print("=" * 60)
 
 question_1 = "What is the capital of France?"
-start_msg = {"type": "start", "token": TOKEN, "question": question_1}
+start_msg = {"type": "start", "token": TOKEN, "question": question_1, "notebook_id": NOTEBOOK_ID}
 print(f"\n  Client sends: {json.dumps(start_msg, indent=2)}")
 
 messages_received = []
@@ -161,7 +174,7 @@ print("TEST 2: 'Who was the first person to walk on Mars?'")
 print("=" * 60)
 
 question_2 = "Who was the first person to walk on Mars?"
-start_msg_2 = {"type": "start", "token": TOKEN, "question": question_2, "min_similarity": 0.7}
+start_msg_2 = {"type": "start", "token": TOKEN, "question": question_2, "min_similarity": 0.7, "notebook_id": NOTEBOOK_ID}
 print(f"\n  Client sends: {json.dumps(start_msg_2, indent=2)}")
 
 messages_received_2 = []

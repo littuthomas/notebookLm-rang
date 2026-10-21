@@ -103,14 +103,19 @@ def test_legacy_documents_listing_shape(client, user_a, db):
     nb = make_notebook(client, user_a["headers"])
     insert_document(db, nb["id"], document_uuid="legacy-uuid-123")
 
-    # Seed matching chunks so the legacy grouping has something to count
+    # Seed matching chunks so the legacy grouping has something to count.
+    # Chunks must carry the owner's user_id (in production the startup
+    # tenancy migration backfills exactly this), because the legacy listing
+    # is scoped to the authenticated user's own chunks.
     from app.models.chunk import DocumentChunk
+    from app.models.user import User
 
-    db.add(DocumentChunk(document_id="legacy-uuid-123", chunk_index=0, content="c0", embedding=[0.0] * 768))
-    db.add(DocumentChunk(document_id="legacy-uuid-123", chunk_index=1, content="c1", embedding=[0.0] * 768))
+    owner = db.query(User).filter(User.username == user_a["username"]).first()
+    db.add(DocumentChunk(document_id="legacy-uuid-123", chunk_index=0, content="c0", embedding=[0.0] * 768, user_id=owner.id))
+    db.add(DocumentChunk(document_id="legacy-uuid-123", chunk_index=1, content="c1", embedding=[0.0] * 768, user_id=owner.id))
     db.commit()
 
-    r = client.get("/api/documents/legacy")
+    r = client.get("/api/documents/legacy", headers=user_a["headers"])
     assert r.status_code == 200
     body = r.json()
     assert "documents" in body and "total" in body
@@ -179,12 +184,27 @@ def test_stats_counts_user_data_only(client, user_a, user_b, db):
     insert_document(db, nb_a["id"], chunk_count=4)
     insert_document(db, nb_b["id"], chunk_count=99)
 
+    # Expected values are derived from the DB because user_a is session-scoped
+    # and already owns documents created by earlier tests in this session.
+    from app.models.notebook import DocumentMeta, Notebook
+    from app.models.user import User
+
+    user = db.query(User).filter(User.username == user_a["username"]).first()
+    owned = (
+        db.query(DocumentMeta)
+        .join(Notebook, DocumentMeta.notebook_id == Notebook.id)
+        .filter(Notebook.user_id == user.id)
+        .all()
+    )
+    expected_docs = len(owned)
+    expected_chunks = sum(d.chunk_count for d in owned)
+
     r = client.get("/api/stats", headers=user_a["headers"])
     assert r.status_code == 200
     stats = r.json()
     assert stats["notebooks"] >= 1
-    assert stats["documents"] == 1  # only user_a's doc
-    assert stats["total_chunks"] == 4  # not 103
+    assert stats["documents"] == expected_docs  # A's own docs only — never B's
+    assert stats["total_chunks"] == expected_chunks  # 99-chunk doc of B not counted
 
 
 def test_stats_requires_auth(client):

@@ -8,7 +8,7 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -28,6 +28,14 @@ class NotebookCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     color: str = Field(default="lavender", max_length=20)
+
+    @field_validator("name")
+    @classmethod
+    def _reject_blank_name(cls, v: str) -> str:
+        """Whitespace-only names are blank (422), same as empty strings."""
+        if not v or not v.strip():
+            raise ValueError("Name cannot be blank")
+        return v
 
 
 class NotebookUpdate(BaseModel):
@@ -61,6 +69,27 @@ class SavedAnswerCreate(BaseModel):
 
 
 # ---------------------------------------------------------------- notebook CRUD
+
+def _validate_notebook_reference(
+    db: Session, notebook_id: int | None, user: User
+) -> int | None:
+    """Validate a client-supplied notebook_id for notes / saved answers.
+
+    The id must reference a notebook owned by the current user; anything else
+    (including another user's notebook) is a 404. None ("not linked") passes
+    through untouched.
+    """
+    if notebook_id is None:
+        return None
+    notebook = (
+        db.query(Notebook)
+        .filter(Notebook.id == notebook_id, Notebook.user_id == user.id)
+        .first()
+    )
+    if notebook is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    return notebook_id
+
 
 def _get_owned_notebook(db: Session, notebook_id: int, user: User) -> Notebook:
     notebook = (
@@ -208,8 +237,33 @@ def delete_notebook(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> None:
-    """Delete a notebook and its linked metadata."""
+    """Delete a notebook, its linked metadata AND its stored chunks.
+
+    The ORM cascade deletes DocumentMeta/Note/SavedAnswer rows, but chunks in
+    document_chunks are linked by document_uuid, not FK — they must be removed
+    explicitly, otherwise orphaned text + embeddings would remain retrievable
+    across users.
+    """
+    from app.models.chunk import DocumentChunk
+
     notebook = _get_owned_notebook(db, notebook_id, current_user)
+
+    # Collect the document ids first (they die with the cascade).
+    doc_uuids = (
+        db.query(DocumentMeta.document_uuid)
+        .filter(DocumentMeta.notebook_id == notebook.id)
+        .all()
+    )
+    uuid_values = [row[0] for row in doc_uuids]
+
+    if uuid_values:
+        # Restrict the delete to the owner: a matching document_uuid owned by
+        # someone else (should not exist, UUIDs are random) is never touched.
+        db.query(DocumentChunk).filter(
+            DocumentChunk.document_id.in_(uuid_values),
+            DocumentChunk.user_id == current_user.id,
+        ).delete(synchronize_session=False)
+
     db.delete(notebook)
     db.commit()
 
@@ -285,9 +339,16 @@ def delete_document(
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
+    # Owner-restricted chunk delete: the caller has already proven ownership
+    # of the DOCUMENT (doc -> notebook -> user above), so its chunks are safe
+    # to remove by document_uuid. Chunks whose user_id is still NULL (legacy
+    # rows inserted before the tenancy migration ran its backfill) are removed
+    # too — otherwise they would linger with no parent document and could be
+    # re-attributed to another user by the startup backfill.
     db.query(DocumentChunk).filter(
-        DocumentChunk.document_id == doc.document_uuid
-    ).delete()
+        DocumentChunk.document_id == doc.document_uuid,
+        (DocumentChunk.user_id == current_user.id) | (DocumentChunk.user_id.is_(None)),
+    ).delete(synchronize_session=False)
     db.delete(doc)
     db.commit()
 
@@ -329,6 +390,8 @@ def create_note(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Create a note."""
+    # notebook_id must reference a notebook owned by the caller.
+    _validate_notebook_reference(db, request.notebook_id, current_user)
     note = Note(
         user_id=current_user.id,
         notebook_id=request.notebook_id,
@@ -366,6 +429,8 @@ def update_note(
     if request.tags is not None:
         note.tags = ",".join(t.strip() for t in request.tags if t.strip())
     if request.notebook_id is not None:
+        # Ownership check on notebook reassignments too.
+        _validate_notebook_reference(db, request.notebook_id, current_user)
         note.notebook_id = request.notebook_id
     if request.is_pinned is not None:
         note.is_pinned = request.is_pinned
@@ -432,6 +497,8 @@ def create_saved_answer(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Save an AI answer from chat."""
+    # notebook_id must reference a notebook owned by the caller.
+    _validate_notebook_reference(db, request.notebook_id, current_user)
     saved = SavedAnswer(
         user_id=current_user.id,
         notebook_id=request.notebook_id,

@@ -86,11 +86,20 @@ session_a = client.post("/api/chat/sessions", headers=headers_a).json()["id"]
 session_b = client.post("/api/chat/sessions", headers=headers_b).json()["id"]
 print(f"  [OK] sessions: A={session_a} B={session_b}")
 
+# Notebooks are independent knowledge spaces: the WS start message now REQUIRES
+# an owned notebook_id. Create one per user for the chat scope.
+notebook_a = client.post("/api/notebooks", json={"name": "WS history A"}, headers=headers_a).json()["id"]
+notebook_b = client.post("/api/notebooks", json={"name": "WS history B"}, headers=headers_b).json()["id"]
+print(f"  [OK] notebooks: A={notebook_a} B={notebook_b}")
 
-def ws_start(token: str, question: str, session_id: int | None = None) -> dict:
+
+def ws_start(token: str, question: str, session_id: int | None = None, notebook_id: int | None = None) -> dict:
     msg = {"type": "start", "token": token, "question": question}
     if session_id is not None:
         msg["session_id"] = session_id
+    if notebook_id is None:
+        notebook_id = notebook_a
+    msg["notebook_id"] = notebook_id
     return msg
 
 
@@ -189,7 +198,7 @@ expect(len(messages_of(db, session_a)) == 2, "no messages stored when session_id
 
 # ---------------------------------------------------------------------------
 print("\n--- 6. Foreign session_id -> nothing stored, stream unaffected ---")
-received, db = run_ws(ws_start(token_b, "B writes into A?", session_a), HAPPY_STREAM)
+received, db = run_ws(ws_start(token_b, "B writes into A?", session_a, notebook_id_b), HAPPY_STREAM)
 expect(received[-1]["type"] == "complete", "B's stream still completes", str(received[-1]))
 db.expire_all()
 expect(len(messages_of(db, session_a)) == 2, "A's session untouched by B (still 2 messages)")

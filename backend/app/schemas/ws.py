@@ -41,6 +41,15 @@ class WSStartMessage(BaseModel):
             "protocol behaves exactly as before (nothing stored)."
         ),
     )
+    notebook_id: int = Field(
+        ...,
+        ge=1,
+        description=(
+            "Notebook to answer from (mandatory). It must belong to the "
+            "authenticated user; otherwise the request is rejected. Retrieval "
+            "is strictly scoped to this notebook's documents."
+        ),
+    )
 
 
 class WSContextMessage(BaseModel):

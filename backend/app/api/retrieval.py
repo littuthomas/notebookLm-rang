@@ -20,6 +20,15 @@ class RetrievalRequest(BaseModel):
     """Request model for retrieval endpoint."""
     question: str = Field(..., description="The user's question to search for")
     top_k: int = Field(default=5, ge=1, le=100, description="Maximum number of chunks to return")
+    notebook_id: int = Field(
+        ...,
+        ge=1,
+        description=(
+            "Notebook to retrieve from (mandatory). It must belong to the "
+            "authenticated user; otherwise 404. Only that notebook's "
+            "documents are searched."
+        ),
+    )
 
 
 class RetrievedChunk(BaseModel):
@@ -50,14 +59,16 @@ async def retrieve_documents(
     This endpoint:
     1. Takes a user question
     2. Converts it to an embedding vector
-    3. Performs vector similarity search using pgvector
-    4. Returns the most relevant document chunks
+    3. Performs vector similarity search using pgvector, restricted to the
+       authenticated user's own document chunks (tenant isolation)
+    4. Returns the most relevant document chunks owned by the caller
 
     **Note:** This is the basic retrieval pipeline. Gemini answer generation
-    and WebSocket chat will be added in later milestones.
+    and WebSocket chat build on top of it.
 
     - **question**: The user's question to search for
     - **top_k**: Maximum number of chunks to return (default: 5)
+    - **notebook_id**: The notebook to retrieve from (must be owned by the caller); only that notebook's documents are searched
     """
     # --- Error Handling ---
 
@@ -68,18 +79,30 @@ async def retrieve_documents(
             detail="Question cannot be empty",
         )
 
-    # 2. Check if database has any chunks (warn but don't fail)
-    from app.models.chunk import DocumentChunk as DC
-    chunk_count = db.query(DC).count()
-    if chunk_count == 0:
-        logger.warning("No document chunks found in database. Retrieval may return empty results.")
+    # --- Mandatory notebook scoping: the notebook must belong to the caller ---
+    # Notebooks are independent knowledge spaces: retrieval is always scoped
+    # to a single owned notebook, never the user's other notebooks.
+    from app.models.notebook import Notebook
 
-    # --- Retrieval ---
+    notebook_owned = (
+        db.query(Notebook)
+        .filter(Notebook.id == request.notebook_id, Notebook.user_id == current_user.id)
+        .first()
+    )
+    if notebook_owned is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Notebook not found",
+        )
+
+    # --- Retrieval (always scoped to the authenticated user's own chunks) ---
     try:
         retrieval_service = create_retrieval_service(db)
         chunks = retrieval_service.retrieve(
             question=request.question,
             top_k=request.top_k,
+            user_id=current_user.id,
+            notebook_id=request.notebook_id,
         )
 
         # Convert to response format
@@ -108,11 +131,12 @@ async def retrieve_documents(
         )
 
     except RuntimeError as e:
-        # Embedding or database failure
+        # Embedding or database failure. Raw error text (DB messages, provider
+        # details) stays in the server log only — never in the response body.
         logger.error(f"Retrieval failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Retrieval failed: {str(e)}",
+            detail="Retrieval is temporarily unavailable. Please try again later.",
         )
 
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   Grid2X2,
   LayoutList,
@@ -15,7 +15,8 @@ import Modal from '../components/common/Modal'
 import EmptyState from '../components/common/EmptyState'
 import ErrorState from '../components/common/ErrorState'
 import { SkeletonCard } from '../components/common/Loading'
-import { createNotebook, deleteNotebook, listNotebooks, updateNotebook } from '../services/api'
+import CreateNotebookModal from '../components/documents/CreateNotebookModal'
+import { deleteNotebook, listNotebooks, updateNotebook } from '../services/api'
 import type { Notebook } from '../services/api'
 
 const colorClasses: Record<string, { chip: string; bar: string }> = {
@@ -25,10 +26,7 @@ const colorClasses: Record<string, { chip: string; bar: string }> = {
   mint: { chip: 'bg-mint-soft text-mint', bar: 'bg-mint' },
 }
 
-const colors = ['lavender', 'coral', 'sun', 'mint'] as const
-
 export default function Notebooks() {
-  const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const [notebooks, setNotebooks] = useState<Notebook[]>([])
   const [loading, setLoading] = useState(true)
@@ -37,12 +35,9 @@ export default function Notebooks() {
   const [view, setView] = useState<'grid' | 'list'>('grid')
   const [sort, setSort] = useState<'recent' | 'name' | 'sources'>('recent')
 
-  // create modal (auto-opened via ?new=1)
+  // create modal (auto-opened via ?new=1); the upload-ready dialog lives in
+  // components/documents/CreateNotebookModal
   const [createOpen, setCreateOpen] = useState(searchParams.get('new') === '1')
-  const [newName, setNewName] = useState('')
-  const [newDesc, setNewDesc] = useState('')
-  const [newColor, setNewColor] = useState<string>('lavender')
-  const [creating, setCreating] = useState(false)
 
   // rename / delete
   const [menuFor, setMenuFor] = useState<number | null>(null)
@@ -85,20 +80,11 @@ export default function Notebooks() {
     return list
   }, [notebooks, query, sort])
 
-  async function handleCreate() {
-    if (!newName.trim()) return
-    setCreating(true)
-    try {
-      const nb = await createNotebook(newName.trim(), newDesc.trim(), newColor)
-      setCreateOpen(false)
-      setNewName('')
-      setNewDesc('')
-      navigate(`/notebooks/${nb.id}`)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to create notebook')
-    } finally {
-      setCreating(false)
-    }
+  function handleCreated(nb: Notebook) {
+    // Fresh notebook from the create-with-upload dialog: prepend and let the
+    // sidebar/topbar refresh too.
+    setNotebooks((prev) => [nb, ...prev])
+    window.dispatchEvent(new Event('notebooks:changed'))
   }
 
   async function handleRename() {
@@ -288,62 +274,12 @@ export default function Notebooks() {
         </div>
       )}
 
-      {/* Create modal */}
-      <Modal open={createOpen} onClose={() => setCreateOpen(false)} title="Create Notebook">
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            void handleCreate()
-          }}
-          className="space-y-4"
-        >
-          <div>
-            <label htmlFor="create-name" className="block text-sm font-medium text-ink mb-1.5">Name</label>
-            <input
-              id="create-name"
-              type="text"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder="e.g. Research"
-              autoFocus
-              className="w-full h-11 px-3.5 rounded-xl border border-line bg-cream/50 text-sm text-ink outline-none focus:border-lavender focus:bg-card transition-colors"
-            />
-          </div>
-          <div>
-            <label htmlFor="create-desc" className="block text-sm font-medium text-ink mb-1.5">Description <span className="text-muted font-normal">(optional)</span></label>
-            <textarea
-              id="create-desc"
-              value={newDesc}
-              onChange={(e) => setNewDesc(e.target.value)}
-              placeholder="What is this notebook about?"
-              rows={2}
-              className="w-full px-3.5 py-2.5 rounded-xl border border-line bg-cream/50 text-sm text-ink outline-none focus:border-lavender focus:bg-card transition-colors resize-none"
-            />
-          </div>
-          <div>
-            <span className="block text-sm font-medium text-ink mb-1.5">Colour</span>
-            <div className="flex gap-2" role="radiogroup" aria-label="Notebook colour">
-              {colors.map((color) => (
-                <button
-                  key={color}
-                  type="button"
-                  role="radio"
-                  aria-checked={newColor === color}
-                  onClick={() => setNewColor(color)}
-                  className={`h-8 w-8 rounded-full ${colorClasses[color].bar} ${
-                    newColor === color ? 'ring-2 ring-offset-2 ring-ink/30 scale-110' : 'opacity-70 hover:opacity-100'
-                  } transition-all`}
-                  aria-label={`Colour ${color}`}
-                />
-              ))}
-            </div>
-          </div>
-          <div className="flex justify-end gap-2 pt-1">
-            <Button type="button" variant="ghost" onClick={() => setCreateOpen(false)}>Cancel</Button>
-            <Button type="submit" loading={creating} disabled={!newName.trim()}>Create</Button>
-          </div>
-        </form>
-      </Modal>
+      {/* Create modal (title/description/colour + drag-and-drop upload) */}
+      <CreateNotebookModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreated={handleCreated}
+      />
 
       {/* Rename modal */}
       <Modal open={renameTarget !== null} onClose={() => setRenameTarget(null)} title="Rename Notebook">

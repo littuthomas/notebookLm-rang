@@ -74,19 +74,48 @@ async def chat_ws(websocket: WebSocket) -> None:
                 db_session = next(get_db())
                 orchestrator = WSRAGOrchestrator(db=db_session)
 
+                # Resolve the authenticated user ONCE — the WS RAG flow MUST
+                # scope retrieval to this user's own chunks (tenant isolation).
+                user = (
+                    db_session.query(User)
+                    .filter(User.username == username)
+                    .first()
+                )
+                user_id: int | None = user.id if user is not None else None
+                if user_id is None or not user.is_active:
+                    await websocket.send_json(
+                        {"type": "error", "detail": "Authentication failed: user not found"}
+                    )
+                    break
+
+                # Mandatory notebook scoping: notebooks are independent
+                # knowledge spaces, so the notebook must exist and belong to
+                # the authenticated user. Without it there is no safe scope.
+                from app.models.notebook import Notebook
+
+                notebook_owned = (
+                    db_session.query(Notebook)
+                    .filter(
+                        Notebook.id == start.notebook_id,
+                        Notebook.user_id == user_id,
+                    )
+                    .first()
+                )
+                if notebook_owned is None:
+                    await websocket.send_json(
+                        {"type": "error", "detail": "Notebook not found"}
+                    )
+                    break
+                scoped_notebook_id: int = start.notebook_id
+
                 # Resolve the chat session (Stage 3): only an owned session is
                 # used for persistence; anything else degrades to "no history".
                 history_session_id: int | None = None
                 if start.session_id is not None:
                     try:
-                        user = (
-                            db_session.query(User)
-                            .filter(User.username == username)
-                            .first()
-                        )
-                        if user is not None and (
+                        if (
                             create_chat_history_service(db_session).get_owned_session(
-                                start.session_id, user.id
+                                start.session_id, user_id
                             )
                             is not None
                         ):
@@ -112,6 +141,8 @@ async def chat_ws(websocket: WebSocket) -> None:
                         question=start.question,
                         top_k=start.top_k,
                         min_similarity=start.min_similarity,
+                        user_id=user_id,
+                        notebook_id=scoped_notebook_id,
                     ):
                         sent_any = True
                         # Accumulate streamed answer text server-side so the
@@ -137,11 +168,6 @@ async def chat_ws(websocket: WebSocket) -> None:
                         and response.get("type") == "complete"
                     ):
                         try:
-                            user = (
-                                db_session.query(User)
-                                .filter(User.username == username)
-                                .first()
-                            )
                             if user is not None:
                                 saved = create_chat_history_service(
                                     db_session

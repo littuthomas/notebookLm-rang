@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   BarChart3,
   Brain,
@@ -11,7 +11,8 @@ import {
   Target,
 } from 'lucide-react'
 import ErrorState from '../components/common/ErrorState'
-import { askQuestion } from '../services/api'
+import { askQuestion, listNotebooks } from '../services/api'
+import type { Notebook } from '../services/api'
 
 interface InsightTool {
   id: string
@@ -23,13 +24,13 @@ interface InsightTool {
 }
 
 const tools: InsightTool[] = [
-  { id: 'summary', title: 'Summary', description: 'A concise overview of your indexed documents.', icon: Sparkles, chip: 'bg-lavender-soft text-lavender-deep', prompt: 'Provide a concise summary of the key points across my indexed documents.' },
-  { id: 'concepts', title: 'Key Concepts', description: 'The most important ideas and definitions found in your sources.', icon: Brain, chip: 'bg-coral-soft text-coral-deep', prompt: 'Explain the key concepts found in my indexed documents.' },
-  { id: 'faq', title: 'Frequently Asked Questions', description: 'Common questions your sources answer, with brief answers.', icon: HelpCircle, chip: 'bg-sun-soft text-ink', prompt: 'List frequently asked questions about my indexed documents, with brief answers.' },
-  { id: 'guide', title: 'Study Guide', description: 'A structured guide to help you learn the material.', icon: ListChecks, chip: 'bg-mint-soft text-mint', prompt: 'Create a study guide from my indexed documents.' },
-  { id: 'quiz', title: 'Quiz', description: 'Test yourself with questions generated from your sources.', icon: Target, chip: 'bg-lavender-soft text-lavender-deep', prompt: 'Create a short quiz based on my indexed documents.' },
-  { id: 'topics', title: 'Important Topics', description: 'The topics that appear most prominently across documents.', icon: FileSearch, chip: 'bg-sun-soft text-ink', prompt: 'List the most important topics across my indexed documents.' },
-  { id: 'analysis', title: 'Document Analysis', description: 'A high-level analysis of themes, tone and structure.', icon: BarChart3, chip: 'bg-mint-soft text-mint', prompt: 'Provide a high-level analysis of my indexed documents: themes, tone and structure.' },
+  { id: 'summary', title: 'Summary', description: 'A concise overview of the selected notebook.', icon: Sparkles, chip: 'bg-lavender-soft text-lavender-deep', prompt: 'Provide a concise summary of the key points in this notebook.' },
+  { id: 'concepts', title: 'Key Concepts', description: 'The most important ideas and definitions found in the selected notebook.', icon: Brain, chip: 'bg-coral-soft text-coral-deep', prompt: 'Explain the key concepts found in this notebook.' },
+  { id: 'faq', title: 'Frequently Asked Questions', description: 'Common questions the selected notebook answers, with brief answers.', icon: HelpCircle, chip: 'bg-sun-soft text-ink', prompt: 'List frequently asked questions about this notebook, with brief answers.' },
+  { id: 'guide', title: 'Study Guide', description: 'A structured guide to help you learn the selected notebook.', icon: ListChecks, chip: 'bg-mint-soft text-mint', prompt: 'Create a study guide from this notebook.' },
+  { id: 'quiz', title: 'Quiz', description: 'Test yourself with questions generated from the selected notebook.', icon: Target, chip: 'bg-lavender-soft text-lavender-deep', prompt: 'Create a short quiz based on this notebook.' },
+  { id: 'topics', title: 'Important Topics', description: 'The topics that appear most prominently in the selected notebook.', icon: FileSearch, chip: 'bg-sun-soft text-ink', prompt: 'List the most important topics in this notebook.' },
+  { id: 'analysis', title: 'Document Analysis', description: 'A high-level analysis of themes, tone and structure in the selected notebook.', icon: BarChart3, chip: 'bg-mint-soft text-mint', prompt: 'Provide a high-level analysis of this notebook: themes, tone and structure.' },
 ]
 
 type Results = Record<string, { text: string; loading: boolean; error: string | null; empty: boolean }>
@@ -37,12 +38,36 @@ type Results = Record<string, { text: string; loading: boolean; error: string | 
 export default function Insights() {
   const [results, setResults] = useState<Results>({})
   const [docError, setDocError] = useState<string | null>(null)
+  const [notebooks, setNotebooks] = useState<Notebook[]>([])
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+
+  // Insights are generated from one notebook at a time, so a target
+  // notebook must be selected before any tool can run.
+  useEffect(() => {
+    void listNotebooks()
+      .then((nbs) => {
+        setNotebooks(nbs)
+        setSelectedId(nbs.length > 0 ? nbs[0].id : null)
+      })
+      .catch(() => setNotebooks([]))
+  }, [])
+
+  const selected = notebooks.find((n) => n.id === selectedId) ?? null
+
+  function selectNotebook(id: number | null) {
+    setSelectedId(id)
+    // Switching notebooks clears the previous notebook's results so no
+    // output generated from another notebook lingers here.
+    setResults({})
+    setDocError(null)
+  }
 
   async function generate(tool: InsightTool) {
+    if (selectedId === null) return
     setDocError(null)
     setResults((prev) => ({ ...prev, [tool.id]: { text: '', loading: true, error: null, empty: false } }))
     try {
-      const res = await askQuestion(tool.prompt)
+      const res = await askQuestion(tool.prompt, selectedId)
       if (!res.found_context) {
         setResults((prev) => ({ ...prev, [tool.id]: { text: '', loading: false, error: null, empty: true } }))
       } else {
@@ -58,11 +83,33 @@ export default function Insights() {
 
   return (
     <div className="p-5 lg:p-8 max-w-6xl mx-auto space-y-6">
-      <div className="anim-fade-up">
-        <h1 className="text-2xl font-semibold text-ink tracking-tight">AI Insights ✨</h1>
-        <p className="text-sm text-muted mt-0.5">
-          Generate summaries, study guides and more from your indexed documents.
-        </p>
+      <div className="anim-fade-up flex flex-wrap items-center gap-3">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-semibold text-ink tracking-tight">AI Insights ✨</h1>
+          <p className="text-sm text-muted mt-0.5">
+            {selected
+              ? `Generated only from: ${selected.name}`
+              : 'Pick a notebook below to generate insights.'}
+          </p>
+        </div>
+
+        {/* Notebook selector: every insight is scoped to this notebook */}
+        <label className="ml-auto flex items-center gap-2 shrink-0">
+          <span className="text-[11px] font-medium text-muted hidden sm:inline">Notebook</span>
+          <select
+            value={selectedId ?? ''}
+            onChange={(e) => selectNotebook(e.target.value === '' ? null : Number(e.target.value))}
+            aria-label="Select notebook for insights"
+            className="h-9 max-w-[180px] md:max-w-none px-2.5 rounded-xl border border-line bg-card text-sm text-ink outline-none focus:border-lavender transition-colors"
+          >
+            {notebooks.length === 0 && <option value="">No notebooks yet</option>}
+            {notebooks.map((n) => (
+              <option key={n.id} value={n.id}>
+                {n.name}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       {docError && <ErrorState message={docError} />}
@@ -107,7 +154,7 @@ export default function Insights() {
                 <button
                   type="button"
                   onClick={() => void generate(tool)}
-                  disabled={r?.loading}
+                  disabled={r?.loading || selectedId === null}
                   className="flex-1 h-9 rounded-xl bg-lavender text-white text-sm font-medium hover:bg-lavender-deep transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {r?.text ? 'Regenerate' : 'Generate'}
@@ -132,8 +179,8 @@ export default function Insights() {
         <div className="bg-card rounded-2xl border border-dashed border-line py-10 px-6 text-center anim-fade-up">
           <Sparkles size={26} className="mx-auto text-sun mb-3" aria-hidden="true" />
           <p className="text-sm text-muted max-w-md mx-auto">
-            Pick any card above — the insight is generated live from your indexed documents with the same RAG pipeline
-            used for chat.
+            Pick a notebook above, then any card — the insight is generated live from that notebook's documents with the
+            same RAG pipeline used for chat.
           </p>
         </div>
       )}

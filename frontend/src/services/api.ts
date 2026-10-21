@@ -289,6 +289,67 @@ export async function uploadDocument(file: File, notebookId: number | string): P
   return (await res.json()) as UploadResult
 }
 
+/**
+ * Upload a file with real, browser-reported upload progress (XMLHttpRequest).
+ *
+ * ``onProgress`` receives 0-100 as the multipart body is transferred to the
+ * backend. After the transfer reaches 100%, the backend still has to validate,
+ * extract text, chunk and embed the document — the returned promise (and the
+ * UploadResult) is the only confirmation that processing succeeded.
+ */
+export function uploadDocumentWithProgress(
+  file: File,
+  notebookId: number | string,
+  onProgress?: (percent: number) => void,
+): Promise<UploadResult> {
+  const token = getToken()
+  const form = new FormData()
+  form.append('file', file)
+  form.append('notebook_id', String(notebookId))
+
+  return new Promise<UploadResult>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${API_BASE_URL}/api/documents/upload`)
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    xhr.responseType = 'json'
+    xhr.timeout = 300_000 // keep long embedding pipelines from hanging forever
+
+    xhr.upload.onprogress = (e) => {
+      if (onProgress && e.lengthComputable) {
+        onProgress(Math.min(100, Math.round((e.loaded / e.total) * 100)))
+      }
+    }
+    xhr.upload.onload = () => onProgress?.(100)
+
+    const fail = (status: number, message: string) => reject(new ApiError(status, message))
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.response as UploadResult)
+        return
+      }
+      const fallbackMap: Record<number, string> = {
+        400: 'Unsupported or empty file. Please use PDF, DOCX, XLSX, TXT, MD or CSV.',
+        401: 'Your session has expired. Please log in again.',
+        413: 'File too large. Maximum size is 20 MB.',
+        422: 'Could not process this document. It may be corrupted or have no extractable text.',
+        500: 'Server error while processing the document.',
+        503: 'AI backend not configured (missing API key on the server).',
+      }
+      const detail =
+        (xhr.response as { detail?: unknown } | null)?.detail
+      let msg = fallbackMap[xhr.status] ?? 'Upload failed. Please try again.'
+      if (typeof detail === 'string') msg = detail
+      fail(xhr.status, msg)
+    }
+    xhr.ontimeout = () => fail(0, 'The upload timed out. Please try again later.')
+    xhr.onerror = () => fail(0, 'Unable to connect to the server. Please make sure the backend is running.')
+    xhr.onabort = () => fail(0, 'Upload cancelled.')
+
+    xhr.send(form)
+  })
+}
+
 // ------------------------------------------------------------------- notes
 
 export async function listNotes(): Promise<Note[]> {
@@ -328,10 +389,28 @@ export async function deleteSavedAnswer(id: number): Promise<void> {
 
 // ------------------------------------------------------------------- chat
 
-export async function askQuestion(question: string, topK?: number, minSimilarity?: number): Promise<ChatResponse> {
+/**
+ * Ask a RAG question scoped to ONE notebook (mandatory).
+ *
+ * Every chat request carries the selected ``notebookId``; the backend enforces
+ * ownership and strictly restricts retrieval + generation to that notebook's
+ * documents — chunks from other notebooks are never used, and unanswered
+ * questions return an honest "not found" response instead of guessing.
+ */
+export async function askQuestion(
+  question: string,
+  notebookId: number,
+  topK?: number,
+  minSimilarity?: number,
+): Promise<ChatResponse> {
   return request<ChatResponse>('/api/chat', {
     method: 'POST',
-    body: { question, ...(topK !== undefined ? { top_k: topK } : {}), ...(minSimilarity !== undefined ? { min_similarity: minSimilarity } : {}) },
+    body: {
+      question,
+      notebook_id: notebookId,
+      ...(topK !== undefined ? { top_k: topK } : {}),
+      ...(minSimilarity !== undefined ? { min_similarity: minSimilarity } : {}),
+    },
   })
 }
 

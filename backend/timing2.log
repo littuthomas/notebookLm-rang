@@ -1,0 +1,6 @@
+C:\Users\USER\notebook git\rag-system\backend\app\core\config.py:94: UserWarning: JWT_SECRET_KEY is still the default placeholder value — generate a real secret before deploying.
+  warnings.warn(
+WARNING:google_genai._api_client:Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+POST /api/chat generate (non-stream): 348.4s, 42 chars
+WARNING:google_genai._api_client:Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+WS stream: TTFB=118.4s total=118.4s chars=42

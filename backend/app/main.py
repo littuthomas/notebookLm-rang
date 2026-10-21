@@ -15,6 +15,73 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+def ensure_chunk_tenancy_columns(engine) -> None:
+    """Best-effort runtime migration for chunk tenant isolation.
+
+    Adds the ``user_id`` / ``notebook_id`` columns (and owner index) to an
+    existing ``document_chunks`` table, then backfills ownership from the
+    documents/notebooks tables. Fresh installs created by ``create_all``
+    already have the columns, so this is a no-op there.
+
+    Chunks that cannot be attributed to an owner remain visible to NOBODY:
+    retrieval filters on ``user_id`` equality, and NULL rows never match.
+    """
+    if engine is None or not settings.is_database_configured:
+        return
+    if not str(settings.DATABASE_URL).startswith("postgresql"):
+        return
+    try:
+        from sqlalchemy import text
+
+        with engine.begin() as conn:
+            cols = conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'document_chunks'"
+                )
+            ).fetchall()
+            names = {row[0] for row in cols}
+
+            if "user_id" not in names:
+                conn.execute(
+                    text("ALTER TABLE document_chunks ADD COLUMN user_id INTEGER")
+                )
+                logger.info("document_chunks.user_id column added")
+            if "notebook_id" not in names:
+                conn.execute(
+                    text("ALTER TABLE document_chunks ADD COLUMN notebook_id INTEGER")
+                )
+                logger.info("document_chunks.notebook_id column added")
+
+            if "user_id" in names or "notebook_id" in names:
+                # Backfill ownership for legacy rows (their parent document has
+                # metadata telling us who owns the notebook).
+                backfilled = conn.execute(
+                    text(
+                        "UPDATE document_chunks c "
+                        "SET user_id = n.user_id, notebook_id = d.notebook_id "
+                        "FROM documents d JOIN notebooks n ON n.id = d.notebook_id "
+                        "WHERE c.document_id = d.document_uuid AND c.user_id IS NULL"
+                    )
+                )
+                if backfilled.rowcount:
+                    logger.info(
+                        "Backfilled ownership for %d legacy document_chunks rows",
+                        backfilled.rowcount,
+                    )
+
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_document_chunks_user_id "
+                    "ON document_chunks (user_id)"
+                )
+            )
+    except Exception as e:
+        # Never block startup on migration issues — but retrieval will keep
+        # scoped queries, so unattributed legacy chunks simply stay invisible.
+        logger.warning(f"Chunk tenancy migration skipped/failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
@@ -31,6 +98,9 @@ async def lifespan(app: FastAPI):
         try:
             Base.metadata.create_all(bind=engine)
             logger.info("Database tables created successfully")
+
+            # Existing deployments: add + backfill chunk owner columns.
+            ensure_chunk_tenancy_columns(engine)
 
             # Seed sample data for testing if database is available
             if settings.EMBEDDING_MODEL == "simple-hash":

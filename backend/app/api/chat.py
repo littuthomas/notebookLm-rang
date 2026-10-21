@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -41,7 +42,8 @@ async def chat(
     ``found_context: false`` with an explanatory answer instead of calling the
     LLM, so no answer is hallucinated.
 
-    - **question**: The question to answer from the indexed documents
+    - **question**: The question to answer from this notebook's documents
+    - **notebook_id**: The notebook to answer from (must be owned by the caller)
     - **top_k**: Optional override for the number of chunks to retrieve
     - **min_similarity**: Optional override for the relevance threshold
     """
@@ -52,13 +54,41 @@ async def chat(
             detail="Question cannot be empty",
         )
 
+    # --- Mandatory notebook scoping: the notebook must belong to the caller ---
+    # Notebooks are independent knowledge spaces: without an owned notebook
+    # there is no safe scope, so the request is refused (404) instead of
+    # falling back to a search across all of the user's notebooks.
+    from app.models.notebook import Notebook
+
+    notebook_owned = (
+        db.query(Notebook)
+        .filter(Notebook.id == request.notebook_id, Notebook.user_id == current_user.id)
+        .first()
+    )
+    if notebook_owned is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Notebook not found",
+        )
+    notebook_id: int = request.notebook_id
+
     # --- RAG pipeline (retrieval + generation live in the service layer) ---
+    # Retrieval is strictly scoped to the authenticated user (and the owned
+    # notebook when one was supplied), so another user's documents can never
+    # enter the context or the returned sources.
     try:
         rag_service = create_rag_service(db)
-        result = rag_service.answer_question(
+        # Run the (blocking) pipeline — embedding + pgvector search + LLM call
+        # with transient-error retries — in a worker thread so retry backoff
+        # sleeps never stall the event loop (and other requests/WebSockets).
+        # The session is only used sequentially, so cross-thread use is safe.
+        result = await asyncio.to_thread(
+            rag_service.answer_question,
             question=request.question,
             top_k=request.top_k,
             min_similarity=request.min_similarity,
+            user_id=current_user.id,
+            notebook_id=notebook_id,
         )
 
         response = ChatResponse(
@@ -77,11 +107,13 @@ async def chat(
         )
 
     except RuntimeError as e:
-        # Embedding, vector search, Gemini or database failure
+        # Embedding, vector search, Gemini or database failure. Log the raw
+        # error server-side only; the client gets a sanitized message with no
+        # internal details (DB errors, keys, document contents) in it.
         logger.error(f"RAG pipeline failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"RAG pipeline failed: {str(e)}",
+            detail="The answer service is temporarily unavailable. Please try again later.",
         )
 
     # --- Persist the exchange (additive; requires an owned session_id) ---

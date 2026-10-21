@@ -27,10 +27,22 @@ async def run(question: str, min_similarity: float | None = None):
             "username": "manual_test", "password": "test1234"
         })
         token = r.json()["access_token"]
+
+        # Chat requires an owned notebook scope now: create/reuse one.
+        r = await http.post(
+            f"{base}/api/notebooks",
+            json={"name": "Manual WS test notebook"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if r.status_code not in (200, 201):
+            print(f"   Notebook creation failed: {r.status_code} {r.text}")
+            return
+        notebook_id = r.json()["id"]
+        print(f"   Notebook ready (id={notebook_id})")
     print(f"   Token obtained ({len(token)} chars)")
 
     # --- Step 2: Connect and send question ---
-    msg = {"type": "start", "token": token, "question": question}
+    msg = {"type": "start", "token": token, "question": question, "notebook_id": notebook_id}
     if min_similarity is not None:
         msg["min_similarity"] = min_similarity
 

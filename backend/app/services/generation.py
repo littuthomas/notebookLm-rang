@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import random
 import re
+import time
 from typing import AsyncIterator, Generator, Optional
 
 from app.core.config import get_settings
@@ -11,19 +13,22 @@ settings = get_settings()
 # Returned verbatim (without calling the LLM) when retrieval finds no usable context,
 # and also instructed to the LLM when the context does not contain the answer.
 NO_ANSWER_MESSAGE = (
-    "I could not find the answer to your question in the available documents."
+    "The answer was not found in the documents in this notebook."
 )
 
 SYSTEM_INSTRUCTION = (
     "You are a retrieval-augmented assistant. Answer the user's question using ONLY "
-    "the provided context.\n"
+    "the provided context from the currently selected notebook.\n"
     "Rules:\n"
     "1. Base every statement strictly on the provided context.\n"
     "2. Do not use outside or internal knowledge, and never invent facts, names or numbers.\n"
-    "3. Cite the sources you rely on inline using their labels, e.g. [Source 1].\n"
-    "4. If the context does not contain the answer, reply exactly with: "
+    "3. Answer ONLY the specific question asked. Do not summarize the notebook, do not "
+    "answer other questions, and do not include unrelated facts or topics that were not asked about.\n"
+    "4. Cite the sources you rely on inline using their labels, e.g. [Source 1]. "
+    "Cite a source only if it actually supports the statement.\n"
+    "5. If the context does not contain the answer, reply exactly with: "
     f"\"{NO_ANSWER_MESSAGE}\"\n"
-    "5. Be concise and answer directly."
+    "6. Be concise and answer directly."
 )
 
 # Generic, user-safe error message. Raw provider errors, API keys, and stack
@@ -31,6 +36,57 @@ SYSTEM_INSTRUCTION = (
 GENERATION_UNAVAILABLE_MESSAGE = (
     "The answer generation service is temporarily unavailable. Please try again later."
 )
+
+# Nemotron 3 Ultra is a reasoning model: on OpenRouter its reasoning tokens
+# spend from the same max_tokens budget as the visible answer. Pad the
+# fallback budget so reasoning cannot consume the whole answer allocation.
+FALLBACK_MAX_TOKENS_MULTIPLIER = 4
+
+# Number of characters of the PRIMARY stream that are held back before any
+# token is flushed to the client. If Gemini dies while the buffer is still
+# holding (e.g. a transport error mid-request), the partial output is discarded
+# and the fallback streams a clean, single-model answer — no stitched output.
+# Once flushed, mid-stream failures keep their previous behaviour (an error):
+# switching models after real tokens reached the user would splice two
+# different models' output together.
+STREAM_FLUSH_THRESHOLD_CHARS = 40
+
+# Lowercase signatures of TRANSIENT Gemini API errors worth retrying with
+# exponential backoff before giving up and using the fallback LLM. The most
+# common one in practice is 503 UNAVAILABLE ("model is currently experiencing
+# high demand"), which is usually gone after a short delay.
+_TRANSIENT_ERROR_SIGNATURES = (
+    "503",
+    "unavailable",
+    "overloaded",
+    "429",
+    "resource_exhausted",
+    "rate limit",
+    "500",
+    "internal error",
+    "504",
+    "deadline exceeded",
+    "timeout",
+    "connection reset",
+    "connection aborted",
+)
+
+
+def _is_transient_generation_error(exc: Exception) -> bool:
+    """True when ``exc`` looks like a transient provider error worth retrying.
+
+    Auth/validation errors, empty/blocked responses and anything else not in
+    the signature list are treated as permanent and fail fast.
+    """
+    message = str(exc).lower()
+    return any(sig in message for sig in _TRANSIENT_ERROR_SIGNATURES)
+
+
+def _generation_retry_delay(attempt: int) -> float:
+    """Exponential backoff delay (seconds) for retry ``attempt`` (1-based)."""
+    delay = settings.GEMINI_LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+    # Full jitter to avoid thundering-herd retries across concurrent requests.
+    return min(random.uniform(0, delay), settings.GEMINI_LLM_RETRY_MAX_DELAY)
 
 # Matches a <think>...</think> reasoning block at the start of a response.
 _THINK_BLOCK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
@@ -65,9 +121,10 @@ class GenerationService:
     """Service for generating grounded answers with a primary + fallback LLM.
 
     Primary: Gemini (non-streaming and streaming), unchanged.
-    Fallback: NVIDIA Nemotron (OpenAI-compatible API), used ONLY when the Gemini
-    call fails before producing a complete answer. Embeddings, retrieval and the
-    RAG prompt are untouched by this fallback.
+    Fallback: NVIDIA Nemotron 3 Ultra, routed through OpenRouter's
+    OpenAI-compatible API, used ONLY when the Gemini call fails before producing
+    a complete answer. Embeddings, retrieval and the RAG prompt are untouched by
+    this fallback.
 
     Kept separate from :class:`~app.services.embedding.EmbeddingService` so the
     embedding model (gemini-embedding-2) and the generation model can evolve
@@ -94,9 +151,9 @@ class GenerationService:
         Generate an answer to ``question`` grounded in ``context``.
 
         Tries Gemini first (primary). If the Gemini call fails, falls back to
-        NVIDIA Nemotron (same question, same context, same prompt). If both
-        fail, raises a sanitized RuntimeError — raw provider errors never reach
-        the caller/user.
+        NVIDIA Nemotron 3 Ultra via OpenRouter (same question, same context,
+        same prompt). If both fail, raises a sanitized RuntimeError — raw
+        provider errors never reach the caller/user.
 
         Args:
             question: The user's question.
@@ -130,13 +187,13 @@ class GenerationService:
         if not settings.LLM_FALLBACK_ENABLED:
             raise RuntimeError(GENERATION_UNAVAILABLE_MESSAGE)
 
-        if not settings.NVIDIA_API_KEY:
-            logger.error("Fallback unavailable: NVIDIA_API_KEY is not configured")
+        if not settings.OPENROUTER_API_KEY:
+            logger.error("Fallback unavailable: OPENROUTER_API_KEY is not configured")
             raise RuntimeError(GENERATION_UNAVAILABLE_MESSAGE)
 
         try:
             answer = self._generate_nemotron(prompt)
-            self.last_model_used = settings.NVIDIA_LLM_MODEL
+            self.last_model_used = settings.OPENROUTER_LLM_MODEL
             return answer
         except ValueError:
             raise
@@ -148,11 +205,15 @@ class GenerationService:
         """
         Stream an answer to ``question`` grounded in ``context``.
 
-        Tries Gemini streaming first (primary). If Gemini fails BEFORE the
-        first token is yielded, streams the fallback NVIDIA Nemotron response
-        instead (same question, same context, same prompt). If Gemini fails
-        after it has already yielded tokens, the error is raised as before —
-        the fallback is never started mid-answer.
+        Tries Gemini streaming first (primary). The first tokens are buffered
+        until STREAM_FLUSH_THRESHOLD_CHARS characters accumulate; if Gemini
+        fails while nothing has been flushed yet (request-time 503, mid-request
+        transport error, …), the buffered partial output is discarded and the
+        fallback NVIDIA Nemotron (OpenRouter) streams the answer instead (same
+        question, same context, same prompt — never a stitched, two-model
+        answer). If Gemini fails after tokens were already flushed to the
+        client, the error is raised as before — the fallback is never started
+        mid-answer.
 
         Args:
             question: The user's question.
@@ -164,7 +225,8 @@ class GenerationService:
         Raises:
             ValueError: If the question or context is empty.
             RuntimeError: If streaming fails from both providers (before any
-                token was yielded), or mid-stream after tokens were yielded.
+                token was flushed to the client), or mid-stream after flushed
+                tokens were yielded.
         """
         if not question or not question.strip():
             raise ValueError("Question cannot be empty")
@@ -173,11 +235,33 @@ class GenerationService:
 
         prompt = build_rag_prompt(question=question, context=context)
 
+        # Buffered prefix of the primary stream: nothing reaches the client
+        # until STREAM_FLUSH_THRESHOLD_CHARS characters have accumulated (or
+        # the primary stream completes). This widens the safe fallback window
+        # from "before the first token" to "before the first flushed token",
+        # covering mid-request Gemini failures without ever splicing two
+        # different models' output into one answer.
         yielded_any = False
+        pending: list[str] = []
+        pending_len = 0
         try:
             async for token in self._stream_gemini(prompt):
-                yielded_any = True
+                if not yielded_any:
+                    pending.append(token)
+                    pending_len += len(token)
+                    if pending_len < STREAM_FLUSH_THRESHOLD_CHARS:
+                        continue
+                    # Threshold reached — flush the buffer as real output.
+                    for buffered in pending:
+                        yield buffered
+                    pending.clear()
+                    pending_len = 0
+                    yielded_any = True
+                    continue
                 yield token
+            # Primary stream completed: flush whatever was still buffered.
+            for buffered in pending:
+                yield buffered
             self.last_model_used = self._model
             return
         except ValueError:
@@ -190,23 +274,24 @@ class GenerationService:
                 raise RuntimeError(
                     GENERATION_UNAVAILABLE_MESSAGE
                 ) from e
-            # Gemini failed before the first token (e.g. 503 at request time).
+            # Gemini failed before ANY token was flushed (buffer discarded) —
+            # e.g. a 503 at request time or a mid-request transport error.
             logger.error(
-                f"Primary LLM (Gemini) streaming failed before any token, "
-                f"attempting fallback: {e}"
+                f"Primary LLM (Gemini) streaming failed before any flushed "
+                f"token, attempting fallback: {e}"
             )
 
         if not settings.LLM_FALLBACK_ENABLED:
             raise RuntimeError(GENERATION_UNAVAILABLE_MESSAGE)
 
-        if not settings.NVIDIA_API_KEY:
-            logger.error("Fallback unavailable: NVIDIA_API_KEY is not configured")
+        if not settings.OPENROUTER_API_KEY:
+            logger.error("Fallback unavailable: OPENROUTER_API_KEY is not configured")
             raise RuntimeError(GENERATION_UNAVAILABLE_MESSAGE)
 
         try:
             async for token in self._stream_nemotron(prompt):
                 yield token
-            self.last_model_used = settings.NVIDIA_LLM_MODEL
+            self.last_model_used = settings.OPENROUTER_LLM_MODEL
         except ValueError:
             raise
         except Exception as e:
@@ -236,18 +321,45 @@ class GenerationService:
         # automatic function calling is dead weight. With it disabled the SDK
         # takes the direct request path and skips its AFC wrapper, which logs
         # a "Direct use of automatic function calling" warning.
-        response = client.models.generate_content(
-            model=self._model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                temperature=self._temperature,
-                max_output_tokens=self._max_output_tokens,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=True
-                ),
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=self._temperature,
+            max_output_tokens=self._max_output_tokens,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                disable=True
             ),
         )
+
+        # Retry transient provider errors (e.g. 503 "high demand") with
+        # exponential backoff before giving up and using the fallback LLM.
+        attempt = 0
+        while True:
+            try:
+                response = client.models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                    config=config,
+                )
+                break
+            except Exception as e:
+                attempt += 1
+                if not _is_transient_generation_error(e) or attempt > settings.GEMINI_LLM_MAX_RETRIES:
+                    if attempt > settings.GEMINI_LLM_MAX_RETRIES:
+                        logger.error(
+                            "Gemini still failing after %d retr%s: %s",
+                            settings.GEMINI_LLM_MAX_RETRIES,
+                            "y" if settings.GEMINI_LLM_MAX_RETRIES == 1 else "ies",
+                            e,
+                        )
+                    raise
+                delay = _generation_retry_delay(attempt)
+                logger.warning(
+                    "Transient Gemini error (attempt %d), retrying in %.1fs: %s",
+                    attempt,
+                    delay,
+                    e,
+                )
+                time.sleep(delay)
 
         try:
             answer = response.text
@@ -271,22 +383,58 @@ class GenerationService:
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
         # Typed config with AFC disabled (see _generate_gemini above).
-        response = client.models.generate_content_stream(
-            model=self._model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                temperature=self._temperature,
-                max_output_tokens=self._max_output_tokens,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=True
-                ),
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=self._temperature,
+            max_output_tokens=self._max_output_tokens,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                disable=True
             ),
         )
 
+        # Retry transient errors while opening the stream: the HTTP request is
+        # only actually sent when the first chunk is pulled, so a retry header
+        # never leaks tokens to the client and the fallback logic upstream
+        # (which refuses to switch models mid-answer) is never jeopardized.
+        attempt = 0
+        while True:
+            try:
+                response = client.models.generate_content_stream(
+                    model=self._model,
+                    contents=prompt,
+                    config=config,
+                )
+                chunk_iter = iter(response)
+                first_chunk = next(chunk_iter, None)  # sends the request
+                break
+            except Exception as e:
+                attempt += 1
+                if not _is_transient_generation_error(e) or attempt > settings.GEMINI_LLM_MAX_RETRIES:
+                    if attempt > settings.GEMINI_LLM_MAX_RETRIES:
+                        logger.error(
+                            "Gemini streaming still failing after %d retr%s: %s",
+                            settings.GEMINI_LLM_MAX_RETRIES,
+                            "y" if settings.GEMINI_LLM_MAX_RETRIES == 1 else "ies",
+                            e,
+                        )
+                    raise
+                delay = _generation_retry_delay(attempt)
+                logger.warning(
+                    "Transient Gemini streaming error (attempt %d), retrying in %.1fs: %s",
+                    attempt,
+                    delay,
+                    e,
+                )
+                await asyncio.sleep(delay)
+
+        def _all_chunks():
+            if first_chunk is not None:
+                yield first_chunk
+            yield from chunk_iter
+
         yielded_any = False
         try:
-            for chunk in response:
+            for chunk in _all_chunks():
                 if chunk.text:
                     yielded_any = True
                     yield chunk.text
@@ -298,19 +446,29 @@ class GenerationService:
             raise RuntimeError("Gemini streaming returned no usable text")
 
     # ------------------------------------------------------------------
-    # Fallback: NVIDIA Nemotron (OpenAI-compatible API)
+    # Fallback: NVIDIA Nemotron 3 Ultra via OpenRouter (OpenAI-compatible API)
     # ------------------------------------------------------------------
 
+    def _fallback_max_tokens(self) -> int:
+        """max_tokens for the OpenRouter fallback, with reasoning headroom.
+
+        Nemotron 3 Ultra's reasoning tokens count against max_tokens on
+        OpenRouter. With the plain answer budget the model could spend it all
+        reasoning and return empty content (finish_reason="length"), so the
+        budget is padded and reasoning effort is set to "low".
+        """
+        return self._max_output_tokens * FALLBACK_MAX_TOKENS_MULTIPLIER
+
     def _get_nemotron_client(self):
-        """Create an OpenAI client pointed at the NVIDIA API.
+        """Create an OpenAI client pointed at the OpenRouter API.
 
         The API key is passed via the SDK and is never logged.
         """
         from openai import OpenAI
 
         return OpenAI(
-            base_url=settings.NVIDIA_LLM_BASE_URL,
-            api_key=settings.NVIDIA_API_KEY,
+            base_url=settings.OPENROUTER_LLM_BASE_URL,
+            api_key=settings.OPENROUTER_API_KEY,
         )
 
     def _build_nemotron_messages(self, prompt: str) -> list[dict]:
@@ -336,17 +494,19 @@ class GenerationService:
         return extract_answer_text(content)
 
     def _generate_nemotron(self, prompt: str) -> str:
-        """Generate a completion using NVIDIA Nemotron (non-streaming fallback)."""
+        """Generate a completion using Nemotron 3 Ultra via OpenRouter (non-streaming fallback)."""
         client = self._get_nemotron_client()
 
-        # Nemotron 3 Ultra supports disabling visible thinking via the chat
-        # template (documented option) so we receive a clean final answer.
+        # OpenRouter's normalized reasoning parameter: exclude reasoning tokens
+        # from the response ("low" effort keeps the reasoning spend small).
+        # Any <think> blocks that still slip through are stripped later by
+        # extract_answer_text().
         response = client.chat.completions.create(
-            model=settings.NVIDIA_LLM_MODEL,
+            model=settings.OPENROUTER_LLM_MODEL,
             messages=self._build_nemotron_messages(prompt),
             temperature=self._temperature,
-            max_tokens=self._max_output_tokens,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            max_tokens=self._fallback_max_tokens(),
+            extra_body={"reasoning": {"effort": "low", "exclude": True}},
         )
 
         if not response.choices:
@@ -369,20 +529,21 @@ class GenerationService:
         """
         client = self._get_nemotron_client()
         messages = self._build_nemotron_messages(prompt)
-        model = settings.NVIDIA_LLM_MODEL
+        model = settings.OPENROUTER_LLM_MODEL
         temperature = self._temperature
-        max_tokens = self._max_output_tokens
+        max_tokens = self._fallback_max_tokens()
 
         def _iter_stream():
-            # Nemotron 3 Ultra: disable visible thinking via the documented
-            # chat-template option so the stream contains only answer content.
+            # OpenRouter's normalized reasoning parameter: exclude reasoning
+            # tokens from the stream (see _generate_nemotron). Any <think>
+            # blocks that still slip through are filtered below.
             return client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                extra_body={"reasoning": {"effort": "low", "exclude": True}},
             )
 
         # Run the blocking SDK stream setup on a worker thread so the event

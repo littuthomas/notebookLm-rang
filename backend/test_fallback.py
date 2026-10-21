@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mocked tests for the NVIDIA Nemotron fallback in GenerationService.
+"""Mocked tests for the Nemotron 3 Ultra (OpenRouter) fallback in GenerationService.
 
 No live API calls are made: Gemini and Nemotron backends are replaced with
 fakes. Verifies the fallback rules:
@@ -60,12 +60,12 @@ QUESTION = "What is the capital of France?"
 CONTEXT = "[Source 1] (chunk_id=1, document_id=doc-1, chunk_index=0, similarity=0.92)\nParis is the capital of France."
 
 
-def with_fallback_settings(enabled: bool = True, api_key: str = "test-nvapi-key"):
+def with_fallback_settings(enabled: bool = True, api_key: str = "test-openrouter-key"):
     """Patch fallback settings without touching the real .env values."""
     return unittest.mock.patch.multiple(
         settings,
         LLM_FALLBACK_ENABLED=enabled,
-        NVIDIA_API_KEY=api_key,
+        OPENROUTER_API_KEY=api_key,
     )
 
 
@@ -129,7 +129,7 @@ try:
     report("Prompt contains the question", QUESTION in (captured_prompts[0] if captured_prompts else ""))
     report("Prompt contains the retrieved context", CONTEXT in (captured_prompts[0] if captured_prompts else ""))
     report("last_model_used reports Nemotron model",
-           svc.last_model_used == settings.NVIDIA_LLM_MODEL,
+           svc.last_model_used == settings.OPENROUTER_LLM_MODEL,
            f"last_model_used={svc.last_model_used!r}")
 except Exception as e:
     report("Test 2 completed without exception", False, f"{type(e).__name__}: {e}")
@@ -148,7 +148,7 @@ try:
         ):
             with unittest.mock.patch.object(
                 svc, "_generate_nemotron",
-                side_effect=RuntimeError("nvapi-key-invalid secret-internal-detail-2"),
+                side_effect=RuntimeError("openrouter-key-invalid secret-internal-detail-2"),
             ):
                 try:
                     svc.generate_answer(question=QUESTION, context=CONTEXT)
@@ -161,7 +161,7 @@ try:
     report("RuntimeError raised with sanitized message", sanitized,
            f"error={error_text!r}")
     report("Raw provider error NOT exposed", "secret-internal-detail" not in error_text)
-    report("API key value NOT exposed", "test-nvapi-key" not in error_text)
+    report("API key value NOT exposed", "test-openrouter-key" not in error_text)
 except Exception as e:
     report("Test 3 completed without exception", False, f"{type(e).__name__}: {e}")
 
@@ -205,15 +205,22 @@ try:
            "".join(tokens) == "Paris is the capital.",
            f"tokens={''.join(tokens)!r}")
     report("last_model_used reports Nemotron model",
-           svc.last_model_used == settings.NVIDIA_LLM_MODEL,
+           svc.last_model_used == settings.OPENROUTER_LLM_MODEL,
            f"last_model_used={svc.last_model_used!r}")
 except Exception as e:
     report("Test 4 completed without exception", False, f"{type(e).__name__}: {e}")
 
 
-# ===== Test 5: Streaming - Gemini fails AFTER tokens -> no fallback =========
+# ===== Test 5: Streaming - Gemini fails before flush -> clean fallback ======
+#
+# Contract (buffered streaming): primary tokens are held until
+# STREAM_FLUSH_THRESHOLD_CHARS chars have accumulated. A Gemini failure while
+# the buffer is still holding discards the partial output and streams the
+# fallback answer instead — no stitched, two-model output ever reaches the
+# client. Failures AFTER the flush threshold keep the old "sanitized error,
+# no fallback" behaviour (covered in tests/test_stream_fallback.py).
 
-print("\n--- Test 5: WS streaming - Gemini fails after tokens ---")
+print("\n--- Test 5: WS streaming - Gemini fails before flush -> fallback ---")
 try:
     svc = GenerationService()
     nemotron_stream_called = []
@@ -221,7 +228,7 @@ try:
     def fake_gemini_stream(prompt):
         async def gen():
             yield "Paris "
-            yield "is the"
+            yield "is the"  # 11 chars < flush threshold: still buffered
             raise RuntimeError("connection reset mid-stream")
         return gen()
 
@@ -229,7 +236,7 @@ try:
         nemotron_stream_called.append(True)
 
         async def gen():
-            yield "should not be streamed"
+            yield "Nemotron answer [Source 1]"
         return gen()
 
     async def run_stream():
@@ -249,13 +256,15 @@ try:
             ):
                 tokens, error = asyncio.run(run_stream())
 
-    report("Tokens yielded before failure are preserved",
-           "".join(tokens) == "Paris is the",
-           f"tokens={''.join(tokens)!r}")
-    report("Nemotron NOT started mid-answer", len(nemotron_stream_called) == 0)
-    report("Sanitized error raised", error == GENERATION_UNAVAILABLE_MESSAGE,
+    joined = "".join(tokens)
+    report("Buffered partial output discarded (no stitched answer)",
+           "Paris" not in joined and joined == "Nemotron answer [Source 1]",
+           f"tokens={joined!r}")
+    report("Fallback streamed instead of erroring", len(nemotron_stream_called) == 1)
+    report("No error raised (fallback answered)", error is None,
            f"error={error!r}")
-    report("Raw mid-stream error NOT exposed", "connection reset" not in (error or ""))
+    report("Raw mid-stream error NOT exposed",
+           "connection reset" not in joined and "connection reset" not in (error or ""))
 except Exception as e:
     report("Test 5 completed without exception", False, f"{type(e).__name__}: {e}")
 
@@ -265,7 +274,7 @@ except Exception as e:
 print("\n--- Test 6: No retrieval context -> neither LLM called ---")
 try:
     class FakeRetrievalNoContext:
-        def retrieve(self, question, top_k=5, min_similarity=0.0):
+        def retrieve(self, question, top_k=5, min_similarity=0.0, user_id=None, notebook_id=None):
             return []
 
     class FakeGeneration:

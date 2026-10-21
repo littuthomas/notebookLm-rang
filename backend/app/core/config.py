@@ -28,13 +28,26 @@ class Settings:
         self.GEMINI_LLM_TEMPERATURE: float = float(os.environ.get("GEMINI_LLM_TEMPERATURE", "0.2"))
         self.GEMINI_LLM_MAX_OUTPUT_TOKENS: int = int(os.environ.get("GEMINI_LLM_MAX_OUTPUT_TOKENS", "1024"))
 
-        # NVIDIA Nemotron fallback LLM (generation ONLY; used when Gemini fails)
-        self.NVIDIA_API_KEY: str = os.environ.get("NVIDIA_API_KEY", "")
-        self.NVIDIA_LLM_MODEL: str = os.environ.get(
-            "NVIDIA_LLM_MODEL", "nvidia/nemotron-3-ultra-550b-a55b"
+        # Retry policy for TRANSIENT Gemini generation errors (e.g. 503
+        # "UNAVAILABLE - high demand", 429 rate limits, 500 internal errors).
+        # Retried with exponential backoff + jitter before the OpenRouter
+        # fallback is attempted.
+        self.GEMINI_LLM_MAX_RETRIES: int = int(os.environ.get("GEMINI_LLM_MAX_RETRIES", "3"))
+        self.GEMINI_LLM_RETRY_BASE_DELAY: float = float(
+            os.environ.get("GEMINI_LLM_RETRY_BASE_DELAY", "1.0")
         )
-        self.NVIDIA_LLM_BASE_URL: str = os.environ.get(
-            "NVIDIA_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1"
+        self.GEMINI_LLM_RETRY_MAX_DELAY: float = float(
+            os.environ.get("GEMINI_LLM_RETRY_MAX_DELAY", "8.0")
+        )
+
+        # Nemotron Ultra fallback LLM (generation ONLY; used when Gemini fails).
+        # Routed through OpenRouter's OpenAI-compatible API using the
+        # OPENROUTER_API_KEY defined below.
+        self.OPENROUTER_LLM_MODEL: str = os.environ.get(
+            "OPENROUTER_LLM_MODEL", "nvidia/nemotron-3-ultra-550b-a55b"
+        )
+        self.OPENROUTER_LLM_BASE_URL: str = os.environ.get(
+            "OPENROUTER_LLM_BASE_URL", "https://openrouter.ai/api/v1"
         )
         self.LLM_FALLBACK_ENABLED: bool = os.environ.get(
             "LLM_FALLBACK_ENABLED", "true"
@@ -50,12 +63,19 @@ class Settings:
         self.JWT_ALGORITHM: str = os.environ.get("JWT_ALGORITHM", "HS256")
         self.ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
-        # OpenRouter (optional)
+        # OpenRouter API key (Nemotron fallback LLM; also an optional embedding
+        # backend when EMBEDDING_MODEL=openrouter)
         self.OPENROUTER_API_KEY: str = os.environ.get("OPENROUTER_API_KEY", "")
 
         # Chunking (document ingestion pipeline)
         self.CHUNK_SIZE: int = int(os.environ.get("CHUNK_SIZE", "1000"))
         self.CHUNK_OVERLAP: int = int(os.environ.get("CHUNK_OVERLAP", "150"))
+
+        # Upload safety limits (DoS / resource protection)
+        self.MAX_UPLOAD_SIZE_MB: int = int(os.environ.get("MAX_UPLOAD_SIZE_MB", "20"))
+        self.MAX_PAGES_PER_DOC: int = int(os.environ.get("MAX_PAGES_PER_DOC", "500"))
+        self.MAX_CHUNKS_PER_DOC: int = int(os.environ.get("MAX_CHUNKS_PER_DOC", "2000"))
+        self.MAX_FILENAME_CHARS: int = int(os.environ.get("MAX_FILENAME_CHARS", "255"))
 
         # Retrieval (ingestion-side alias for RAG_TOP_K)
         self.TOP_K: int = int(os.environ.get("TOP_K", "5"))
@@ -67,6 +87,15 @@ class Settings:
         self.APP_HOST: str = os.environ.get("APP_HOST", "0.0.0.0")
         self.APP_PORT: int = int(os.environ.get("APP_PORT", "8000"))
         self.DEBUG: bool = os.environ.get("DEBUG", "true").lower() in ("1", "true", "yes")
+
+        if self.JWT_SECRET_KEY == "changeme-generate-a-real-secret":
+            import warnings
+
+            warnings.warn(
+                "JWT_SECRET_KEY is still the default placeholder value — "
+                "generate a real secret before deploying.",
+                stacklevel=1,
+            )
 
     # ------------------------------------------------------------------
     # Compatibility aliases (read-only properties, NOT env-backed config)

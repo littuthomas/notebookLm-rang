@@ -4,6 +4,7 @@ import { FileText, Library, MessageSquareText, BookmarkCheck, Search } from 'luc
 import Sidebar from './Sidebar'
 import Topbar from './Topbar'
 import SearchModal from '../common/SearchModal'
+import { ToastHost } from '../common/Toast'
 import { listNotebooks } from '../../services/api'
 import type { Notebook } from '../../services/api'
 
@@ -100,6 +101,9 @@ export default function AppLayout() {
           </button>
         }
       />
+
+      {/* Global toast notifications (see common/Toast) */}
+      <ToastHost />
     </div>
   )
 }

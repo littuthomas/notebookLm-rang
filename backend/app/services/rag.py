@@ -42,6 +42,8 @@ class RAGService:
         question: str,
         top_k: Optional[int] = None,
         min_similarity: Optional[float] = None,
+        user_id: Optional[int] = None,
+        notebook_id: Optional[int] = None,
     ) -> dict:
         """
         Answer a question using retrieved document chunks as context.
@@ -50,6 +52,9 @@ class RAGService:
             question: The user's question.
             top_k: Maximum number of chunks to retrieve (defaults to RAG_TOP_K).
             min_similarity: Minimum cosine similarity (defaults to RAG_MIN_SIMILARITY).
+            user_id: Owner filter — retrieval is restricted to this user's
+                chunks (tenant isolation; mandatory).
+            notebook_id: Optional restriction to a single owned notebook.
 
         Returns:
             Dict with ``answer``, ``sources``, ``found_context`` and ``model``.
@@ -67,17 +72,21 @@ class RAGService:
         )
 
         # Steps 1-3: query embedding + pgvector cosine-similarity search (reused)
+        # Scoped to the authenticated user AND, when given, a single notebook.
         chunks = self.retrieval_service.retrieve(
             question=question,
             top_k=resolved_top_k,
             min_similarity=resolved_min_similarity,
+            user_id=user_id,
+            notebook_id=notebook_id,
         )
 
         # Step 4: no sufficiently relevant chunks -> do not call the LLM / hallucinate
         if not chunks:
             logger.info(
-                "No chunks above min_similarity=%.3f; skipping generation",
+                "No chunks above min_similarity=%.3f (user_id=%s); skipping generation",
                 resolved_min_similarity,
+                user_id,
             )
             return {
                 "answer": NO_ANSWER_MESSAGE,
@@ -91,7 +100,7 @@ class RAGService:
         context = self.build_context(chunks)
 
         # Steps 6-7: ask Gemini to answer using only the supplied context
-        # (falls back to NVIDIA Nemotron if the Gemini call fails).
+        # (falls back to Nemotron Ultra via OpenRouter if the Gemini call fails).
         answer = self.generation_service.generate_answer(
             question=question,
             context=context,

@@ -45,6 +45,8 @@ class WSRAGOrchestrator:
         question: str,
         top_k: int | None = None,
         min_similarity: float | None = None,
+        user_id: int | None = None,
+        notebook_id: int | None = None,
     ) -> AsyncIterator[dict]:
         """Run the streaming RAG pipeline and yield structured WS dict messages.
 
@@ -53,6 +55,9 @@ class WSRAGOrchestrator:
             question: The user's question.
             top_k: Optional override for number of chunks to retrieve.
             min_similarity: Optional override for relevance threshold.
+            user_id: Owner filter — retrieval is restricted to this user's
+                chunks (tenant isolation; mandatory).
+            notebook_id: Optional restriction to a single owned notebook.
 
         Yields:
             Dicts serialised as JSON WebSocket frames.
@@ -93,6 +98,8 @@ class WSRAGOrchestrator:
                     if min_similarity is None
                     else min_similarity
                 ),
+                user_id=user_id,
+                notebook_id=notebook_id,
             )
         except ValueError as e:
             msg = WSErrorMessage(detail=f"Invalid question: {e}").model_dump()
@@ -105,8 +112,12 @@ class WSRAGOrchestrator:
             yield WSCompleteMessage().model_dump()
             return
         except RuntimeError as e:
+            # Raw provider/DB error text stays in the server log; WS clients
+            # get a sanitized message.
             logger.error(f"Retrieval failed for question: {e}")
-            msg = WSErrorMessage(detail=f"Retrieval failed: {e}").model_dump()
+            msg = WSErrorMessage(
+                detail="Retrieval is temporarily unavailable. Please try again later."
+            ).model_dump()
             try:
                 yield msg
             except Exception:
@@ -183,8 +194,15 @@ class WSRAGOrchestrator:
             yield WSCompleteMessage().model_dump()
             return
         except Exception as e:
-            logger.error(f"Gemini streaming failed: {e}", exc_info=True)
-            msg = WSErrorMessage(detail=f"Generation failed: {e}").model_dump()
+            # GenerationService already sanitizes its RuntimeErrors; any other
+            # exception is masked with a generic message here.
+            logger.error(f"Generation streaming failed: {e}", exc_info=True)
+            detail = (
+                str(e)
+                if isinstance(e, RuntimeError)
+                else "Answer generation is temporarily unavailable. Please try again later."
+            )
+            msg = WSErrorMessage(detail=detail).model_dump()
             try:
                 yield msg
             except Exception:

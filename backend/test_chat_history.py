@@ -232,18 +232,28 @@ from unittest.mock import patch  # noqa: E402
 from app.api import chat as chat_api  # noqa: E402
 from app.schemas.chat import ChatRequest  # noqa: E402
 
-# ChatRequest accepts optional session_id
-req = ChatRequest(question="Does optional session_id parse?", session_id=session_a2)
+# ChatRequest accepts optional session_id (notebook_id is mandatory now)
+req = ChatRequest(question="Does optional session_id parse?", session_id=session_a2, notebook_id=notebook_id)
 expect(req.session_id == session_a2, "ChatRequest.session_id accepted")
-expect(ChatRequest(question="no session").session_id is None, "ChatRequest.session_id defaults to None")
+expect(ChatRequest(question="no session", notebook_id=notebook_id).session_id is None, "ChatRequest.session_id defaults to None")
 
 full_app = FastAPI()
 full_app.include_router(auth_router)
 full_app.include_router(history_router)
 from app.api.chat import router as chat_router  # noqa: E402
+from app.api.notebooks import router as notebooks_router  # noqa: E402
 
 full_app.include_router(chat_router)
+full_app.include_router(notebooks_router)
 full_client = TestClient(full_app, raise_server_exceptions=False)
+
+# Notebooks are independent knowledge spaces: POST /api/chat now REQUIRES an
+# owned notebook_id, so create one for user A (created via the same app).
+resp = full_client.post(
+    "/api/notebooks", json={"name": "History test notebook"}, headers=headers_a
+)
+expect(resp.status_code in (200, 201), "notebook for chat scope created", f"{resp.status_code} {resp.text[:120]}")
+notebook_id = resp.json()["id"]
 
 fake_result = {
     "answer": "Stubbed answer for history persistence.",
@@ -255,7 +265,7 @@ with patch.object(chat_api, "create_rag_service") as factory:
     factory.return_value.answer_question.return_value = fake_result
     resp = full_client.post(
         "/api/chat",
-        json={"question": "What is stored in history?", "session_id": session_a2},
+        json={"question": "What is stored in history?", "session_id": session_a2, "notebook_id": notebook_id},
         headers=headers_a,
     )
 expect(resp.status_code == 200, "POST /api/chat -> 200 with stubbed RAG", f"{resp.status_code} {resp.text[:200]}")
@@ -274,7 +284,7 @@ with patch.object(chat_api, "create_rag_service") as factory:
     factory.return_value.answer_question.return_value = fake_result
     resp = full_client.post(
         "/api/chat",
-        json={"question": "B tries to write into A's session", "session_id": session_a},
+        json={"question": "B tries to write into A's session", "session_id": session_a, "notebook_id": notebook_id},
         headers=headers_b,
     )
 expect(resp.status_code == 200, "POST /api/chat still succeeds with foreign session_id")
@@ -285,7 +295,9 @@ expect(resp.json()["title"].startswith("Explain the retrieval"), "A's title unch
 # Omitted session_id behaves exactly as before: answer only, nothing stored
 with patch.object(chat_api, "create_rag_service") as factory:
     factory.return_value.answer_question.return_value = fake_result
-    resp = full_client.post("/api/chat", json={"question": "No history please"}, headers=headers_a)
+    resp = full_client.post(
+        "/api/chat", json={"question": "No history please", "notebook_id": notebook_id}, headers=headers_a
+    )
 expect(resp.status_code == 200, "POST /api/chat without session_id -> 200 (backward compatible)")
 resp = full_client.get(f"/api/chat/sessions/{session_a2}", headers=headers_a)
 expect(len(resp.json()["messages"]) == 2, "no extra messages stored when session_id omitted")

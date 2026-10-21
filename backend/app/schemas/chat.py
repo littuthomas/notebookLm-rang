@@ -20,6 +20,16 @@ class ChatRequest(BaseModel):
             "omitted, the request behaves exactly as before (nothing stored)."
         ),
     )
+    notebook_id: int = Field(
+        ...,
+        ge=1,
+        description=(
+            "Notebook to answer from (mandatory). It must belong to the "
+            "authenticated user; otherwise the request is rejected with 404. "
+            "Retrieval and generation are strictly scoped to this notebook — "
+            "documents from other notebooks are never used."
+        ),
+    )
     top_k: int | None = Field(
         default=None,
         ge=1,
@@ -61,7 +71,7 @@ class ChatResponse(BaseModel):
         ...,
         description=(
             "True if relevant chunks were found and used; False if the answer "
-            "could not be found in the available documents"
+            "could not be found in this notebook's documents"
         ),
     )
     model: str = Field(..., description="Gemini model used for generation")

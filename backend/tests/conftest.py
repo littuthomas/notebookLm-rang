@@ -17,6 +17,18 @@ from sqlalchemy import create_engine, text
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-pytest-only")
 
+# Security tests must make no external AI calls: use the offline hash-based
+# embedding backend and a placeholder Gemini key (satisfies upload plumbing
+# checks only). load_dotenv() never overrides values already set in os.environ.
+os.environ.setdefault("EMBEDDING_MODEL", "simple-hash")
+os.environ.setdefault("GEMINI_API_KEY", "test-key-for-pytest-only-no-real-calls")
+
+# Security tests must make no external AI calls: use the offline hash-based
+# embedding backend and a placeholder Gemini key (satisfies upload plumbing
+# checks only). load_dotenv() never overrides values already set in os.environ.
+os.environ.setdefault("EMBEDDING_MODEL", "simple-hash")
+os.environ.setdefault("GEMINI_API_KEY", "test-key-for-pytest-only-no-real-calls")
+
 
 def _database_url() -> str:
     """Resolve DATABASE_URL from the environment or backend/.env."""
@@ -37,7 +49,22 @@ def test_engine():
         pytest.skip("DATABASE_URL not configured - skipping DB-backed tests")
 
     schema = f"test_{uuid.uuid4().hex[:12]}"
-    engine = create_engine(url, pool_pre_ping=True)
+
+    # Neon poolers reject the "options" startup parameter, so tests connect
+    # through the DIRECT (unpooled) endpoint. Pin the schema via a connection
+    # option rather than a session-level "SET search_path": poolers share
+    # server-side connections between clients, so SET leaks across engines.
+    direct_url = url.replace("-pooler.", ".")
+    sep = "&" if "?" in direct_url else "?"
+    schema_url = f"{direct_url}{sep}options=-csearch_path%3D{schema},public"
+
+    # Point the app's global engine at the same test schema BEFORE app modules
+    # are imported (env wins over backend/.env because load_dotenv never
+    # overrides existing variables). This keeps lifespan side effects
+    # (create_all, tenancy migration, seeding) inside the throwaway schema.
+    os.environ["DATABASE_URL"] = schema_url
+
+    engine = create_engine(schema_url, pool_pre_ping=True)
 
     with engine.begin() as conn:
         conn.execute(text(f'CREATE SCHEMA "{schema}"'))
@@ -48,15 +75,6 @@ def test_engine():
     from app.core.database import Base
 
     Base.metadata.create_all(bind=engine)
-
-    # Make every future connection use the test schema
-    from sqlalchemy import event
-
-    @event.listens_for(engine, "connect")
-    def _set_search_path(dbapi_connection, connection_record):  # noqa: ANN001
-        cursor = dbapi_connection.cursor()
-        cursor.execute(f'SET search_path TO "{schema}"')
-        cursor.close()
 
     yield engine
 

@@ -1,0 +1,6 @@
+C:\Users\USER\notebook git\rag-system\backend\app\core\config.py:94: UserWarning: JWT_SECRET_KEY is still the default placeholder value — generate a real secret before deploying.
+  warnings.warn(
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+embed: [1.56, 1.94, 1.48]s avg=1.66s dims=768

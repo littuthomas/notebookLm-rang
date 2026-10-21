@@ -83,6 +83,10 @@ try:
             "type": "start",
             "token": "definitely-not-a-valid-jwt",
             "question": "What is the capital of France?",
+            # notebook_id is now mandatory; a bogus JWT fails before the
+            # notebook ownership check runs, so any id keeps exercising the
+            # intended auth-failure path.
+            "notebook_id": 1,
         })
 
         # Server should respond with an auth error
