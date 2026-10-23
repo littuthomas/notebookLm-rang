@@ -205,6 +205,8 @@ app.include_router(retrieval_router)
 app.include_router(chat_router)
 app.include_router(chat_history_router)
 app.include_router(chat_ws_router)
+from app.api.auth import refresh_cookie_router  # noqa: E402
+app.include_router(refresh_cookie_router)
 
 
 @app.get("/")

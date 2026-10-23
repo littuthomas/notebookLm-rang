@@ -28,7 +28,9 @@ SYSTEM_INSTRUCTION = (
     "Cite a source only if it actually supports the statement.\n"
     "5. If the context does not contain the answer, reply exactly with: "
     f"\"{NO_ANSWER_MESSAGE}\"\n"
-    "6. Be concise and answer directly."
+    "6. Be thorough and complete: explain your reasoning step by step, cover all "
+    "relevant details from the context, and include specific facts, names and numbers "
+    "from the retrieved sources. Do not truncate a complete answer just to be brief.\n"
 )
 
 # Generic, user-safe error message. Raw provider errors, API keys, and stack
@@ -37,10 +39,10 @@ GENERATION_UNAVAILABLE_MESSAGE = (
     "The answer generation service is temporarily unavailable. Please try again later."
 )
 
-# Nemotron 3 Ultra is a reasoning model: on OpenRouter its reasoning tokens
-# spend from the same max_tokens budget as the visible answer. Pad the
-# fallback budget so reasoning cannot consume the whole answer allocation.
-FALLBACK_MAX_TOKENS_MULTIPLIER = 4
+# Nemotron-class fallback models may spend reasoning tokens from the same
+# max_tokens budget as the visible answer on some providers. Pad the fallback
+# budget modestly so reasoning cannot consume the whole answer allocation.
+FALLBACK_MAX_TOKENS_MULTIPLIER = 2
 
 # Number of characters of the PRIMARY stream that are held back before any
 # token is flushed to the client. If Gemini dies while the buffer is still
@@ -308,7 +310,12 @@ class GenerationService:
     # ------------------------------------------------------------------
 
     def _generate_gemini(self, prompt: str) -> str:
-        """Generate a completion using the Gemini API (non-streaming)."""
+        """Generate a completion using the Gemini API (non-streaming).
+
+        Uses the synchronous google-genai client. This runs inside
+        ``asyncio.to_thread`` in the chat endpoint, so blocking here only
+        consumes one worker-thread slot — it does not stall the event loop.
+        """
         from google import genai
         from google.genai import types
 
@@ -359,7 +366,7 @@ class GenerationService:
                     delay,
                     e,
                 )
-                time.sleep(delay)
+                time.sleep(delay)  # blocks the worker thread, not the event loop
 
         try:
             answer = response.text
@@ -396,16 +403,26 @@ class GenerationService:
         # only actually sent when the first chunk is pulled, so a retry header
         # never leaks tokens to the client and the fallback logic upstream
         # (which refuses to switch models mid-answer) is never jeopardized.
+        #
+        # The google-genai SDK iterator is synchronous: opening the stream and
+        # pulling chunks are blocking network round-trips. Everything that
+        # touches the network runs on worker threads (asyncio.to_thread / a
+        # pump thread) so this async generator never blocks the event loop —
+        # other WebSocket streams and HTTP requests stay responsive while a
+        # Gemini chunk is in flight.
         attempt = 0
         while True:
             try:
-                response = client.models.generate_content_stream(
+                response = await asyncio.to_thread(
+                    client.models.generate_content_stream,
                     model=self._model,
                     contents=prompt,
                     config=config,
                 )
                 chunk_iter = iter(response)
-                first_chunk = next(chunk_iter, None)  # sends the request
+                first_chunk = await asyncio.to_thread(
+                    lambda: next(chunk_iter, None)
+                )  # sends the request
                 break
             except Exception as e:
                 attempt += 1
@@ -427,14 +444,35 @@ class GenerationService:
                 )
                 await asyncio.sleep(delay)
 
-        def _all_chunks():
-            if first_chunk is not None:
-                yield first_chunk
-            yield from chunk_iter
+        # Pump the remaining chunks on a dedicated daemon thread and consume
+        # them via the default executor, so no chunk wait ever stalls the loop.
+        # First chunk is queued BEFORE the pump starts to preserve stream order.
+        import queue as _queue
+        import threading
+
+        chunk_queue: _queue.Queue = _queue.Queue()
+        _SENTINEL = object()
+
+        def _pump():
+            try:
+                for chunk in chunk_iter:
+                    chunk_queue.put(chunk)
+            except Exception as e:  # transport/HTTP error mid-stream
+                chunk_queue.put(e)
+            finally:
+                chunk_queue.put(_SENTINEL)
 
         yielded_any = False
         try:
-            for chunk in _all_chunks():
+            if first_chunk is not None:
+                chunk_queue.put(first_chunk)
+            threading.Thread(target=_pump, daemon=True).start()
+            while True:
+                chunk = await asyncio.to_thread(chunk_queue.get)
+                if chunk is _SENTINEL:
+                    break
+                if isinstance(chunk, Exception):
+                    raise chunk
                 if chunk.text:
                     yielded_any = True
                     yield chunk.text
@@ -548,6 +586,8 @@ class GenerationService:
 
         # Run the blocking SDK stream setup on a worker thread so the event
         # loop (WebSocket) is not blocked, then iterate chunks off-thread too.
+        # Uses the default executor; the chat REST endpoint pins its RAG work to
+        # a dedicated executor via RAG_EXECUTOR in chat.py.
         stream = await asyncio.to_thread(_iter_stream)
 
         think_buffer: str = ""

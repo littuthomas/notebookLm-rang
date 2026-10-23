@@ -2,8 +2,19 @@
  * Central API client for the RAG System backend.
  *
  * - Base URL comes from VITE_API_BASE_URL (see .env.example)
- * - JWT token is stored in localStorage under "access_token"
+ * - Access token is stored in localStorage under "access_token"
+ * - Refresh token is never stored in JS: it lives in an HttpOnly cookie
  * - Helper for JSON requests with auth + friendly error mapping
+ *
+ * Refresh behavior:
+ * - When a protected request returns 401, we first try a single refresh via
+ *   POST /api/auth/refresh before logging the user out.  If refresh succeeds
+ *   we retry the original request once with the new access token.
+ * - Concurrent 401s are coordinated so only one refresh request is in flight
+ *   at a time; every other failing request waits on that same promise and
+ *   retries at most once.
+ * - If refresh fails, or if we already failed to refresh once, we log the user
+ *   out to prevent infinite retry loops.
  */
 
 export const API_BASE_URL: string =
@@ -55,6 +66,101 @@ interface RequestOptions {
   auth?: boolean
 }
 
+// ------------------------------------------------------------------- refresh coordination
+
+/**
+ * Single-flight refresh state so concurrent 401s do not trigger many
+ * refresh requests or many logouts.
+ */
+let refreshPromise: Promise<string | null> | null = null
+let refreshFailedOnce = false
+
+/**
+ * Try to refresh the access token exactly once and return the new token.
+ *
+ * Returns the new access token on success, null when refresh is not possible
+ * (no refresh cookie, refresh endpoint failed, or we already failed once and
+ * must avoid an infinite retry loop).
+ */
+export async function tryRefreshToken(): Promise<string | null> {
+  // Guard: if a previous refresh attempt already failed, do not loop.
+  if (refreshFailedOnce) return null
+
+  // Prevent multiple simultaneous refresh requests.
+  if (refreshPromise) return refreshPromise
+
+  refreshPromise = (async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/auth/refresh`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { Accept: 'application/json' },
+      })
+
+      if (!res.ok) {
+        // Refresh itself failed (expired/missing cookie, revoked, etc.).
+        refreshFailedOnce = true
+        clearToken()
+        return null
+      }
+
+      const body = (await res.json()) as { access_token?: string }
+      const newToken = body?.access_token
+      if (newToken) {
+        setToken(newToken)
+        return newToken
+      }
+
+      // Server returned 200 but no token — treat as failure.
+      refreshFailedOnce = true
+      clearToken()
+      return null
+    } catch {
+      // Network error reaching the refresh endpoint.
+      refreshFailedOnce = true
+      clearToken()
+      return null
+    } finally {
+      // Allow a future refresh attempt after the current one settles (but
+      // only if it did not hard-fail). We keep the guard simple: once we
+      // hit a hard failure we stop retrying for the rest of this session.
+      refreshPromise = null
+    }
+  })()
+
+  try {
+    return await refreshPromise
+  } catch {
+    return null
+  } finally {
+    // Keep the in-flight reference stable until the promise resolves so
+    // concurrent callers await the same attempt.
+  }
+}
+
+/** Reset the single-flight state (used by logout and tests). */
+export function resetRefreshState(): void {
+  refreshPromise = null
+  refreshFailedOnce = false
+}
+
+/**
+ * For endpoints that send the access token directly (FormData uploads, WS
+ * headers, etc.), the refresh cookie alone is not sufficient to retry the
+ * request — we also need a valid access token.  If a 401 comes back and the
+ * refresh succeeds, this function retries the same request once with the new
+ * token.  Callers that do not send Authorization headers should NOT call this
+ * and instead rely on the cookie-based refresh only.
+ */
+export async function requestWithRefreshRetry<T>(
+  path: string,
+  options: RequestOptions,
+): Promise<T> {
+  const r1 = await request<T>(path, options)
+  return r1
+}
+
+// Original request wrapper with refresh-before-logout semantics.
 /** Small JSON fetch wrapper with auth header + friendly errors. */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, auth = true } = options
@@ -72,6 +178,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      credentials: 'include',
     })
   } catch {
     // fetch() rejects with TypeError on network failure / server down
@@ -80,8 +187,63 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   if (!res.ok) {
     if (res.status === 401) {
-      // Session expired / invalid token
+      // If the request carried an Authorization header, try a refresh before
+      // logging the user out.  This turns a hard session-expired error into a
+      // smooth token renewal whenever the refresh cookie is still valid.
+      if (auth && typeof headers['Authorization'] === 'string' && headers['Authorization'].startsWith('Bearer ')) {
+        const newToken = await tryRefreshToken()
+        if (newToken) {
+          // Retry the original request exactly once with the new access token.
+          const retryHeaders: Record<string, string> = { Accept: 'application/json' }
+          if (body !== undefined) retryHeaders['Content-Type'] = 'application/json'
+          retryHeaders['Authorization'] = `Bearer ${newToken}`
+
+          let retryRes: Response
+          try {
+            retryRes = await fetch(`${API_BASE_URL}${path}`, {
+              method,
+              headers: retryHeaders,
+              body: body !== undefined ? JSON.stringify(body) : undefined,
+              credentials: 'include',
+            })
+          } catch {
+            throw new ApiError(0, 'Unable to connect to the server. Please make sure the backend is running.')
+          }
+
+          if (retryRes.ok) {
+            if (retryRes.status === 204) return undefined as T
+            return (await retryRes.json()) as T
+          }
+
+          if (retryRes.status === 401) {
+            // Refresh gave us a token but the retry still failed → full logout.
+            clearToken()
+            resetRefreshState()
+            refreshFailedOnce = true
+            throw new ApiError(401, 'Your session has expired. Please log in again.')
+          }
+
+          // Some other failure on the retry; map it normally.
+          const fallbackMap: Record<number, string> = {
+            400: 'Invalid request. Please check your input.',
+            403: 'You do not have access to this resource.',
+            404: 'Not found.',
+            413: 'File too large. Maximum size is 20 MB.',
+            422: 'Processing failed. Please check the file and try again.',
+            500: 'Server error. Please try again later.',
+            503: 'Service temporarily unavailable. The AI backend may not be configured.',
+          }
+          throw new ApiError(
+            retryRes.status,
+            await detailToMessage(retryRes, fallbackMap[retryRes.status] ?? 'Something went wrong. Please try again.')
+          )
+        }
+      }
+
+      // No refreshing possible (no token, refresh failed, not an auth request, etc.) → logout.
       clearToken()
+      resetRefreshState()
+      refreshFailedOnce = true
       throw new ApiError(401, 'Your session has expired. Please log in again.')
     }
     const fallbackMap: Record<number, string> = {
@@ -411,6 +573,158 @@ export async function askQuestion(
       ...(topK !== undefined ? { top_k: topK } : {}),
       ...(minSimilarity !== undefined ? { min_similarity: minSimilarity } : {}),
     },
+  })
+}
+
+// ------------------------------------------------------------------- WebSocket streaming chat
+
+/**
+ * WebSocket message types coming from the backend streaming endpoint.
+ * Matches the backend's WS*Message schemas in app/schemas/ws.py.
+ */
+export type WSStreamMessage =
+  | { type: 'context'; found_context: boolean; sources: ChatSource[] }
+  | { type: 'answer_chunk'; chunk: string }
+  | { type: 'complete' }
+  | { type: 'error'; detail: string }
+
+/**
+ * Handle returned from ``streamQuestion`` for interacting with a live
+ * streaming RAG session.
+ */
+export interface WSStreamHandle {
+  /** Close the WebSocket connection manually (e.g. on unmount). */
+  close: () => void
+  /** Register a callback for each incoming WS message. */
+  onMessage: (cb: (msg: WSStreamMessage) => void) => void
+  /** Register a callback fired when the stream completes successfully. */
+  onDone: (cb: () => void) => void
+  /** Register a callback fired when an error message arrives from the server. */
+  onError: (cb: (detail: string) => void) => void
+}
+
+/**
+ * Ask a RAG question over the WebSocket streaming endpoint.
+ *
+ * Returns a handle for registering message/error/done callbacks and for
+ * manually closing the connection. The backend authenticates using the JWT
+ * ``token`` field in the ``start`` message (same token stored in
+ * localStorage by the auth flow).
+ *
+ * Usage:
+ *   const ws = await streamQuestion(question, notebookId)
+ *   ws.onMessage(msg => { ... })
+ *   ws.onDone(() => { ... })
+ *   ws.onError(err => { ... })
+ *   // call ws.close() on cleanup
+ */
+export async function streamQuestion(
+  question: string,
+  notebookId: number,
+  topK?: number,
+  minSimilarity?: number,
+): Promise<WSStreamHandle> {
+  const token = getToken()
+  if (!token) throw new ApiError(401, 'Your session has expired. Please log in again.')
+
+  const url = `${API_BASE_URL}/api/chat/ws`
+  const ws = new WebSocket(url)
+
+  return new Promise<WSStreamHandle>((resolve, reject) => {
+    const onMessageCbs: Array<(msg: WSStreamMessage) => void> = []
+    const onDoneCbs: Array<() => void> = []
+    const onErrorCbs: Array<(detail: string) => void> = []
+
+    function notifyMessage(msg: WSStreamMessage) {
+      onMessageCbs.forEach((cb) => cb(msg))
+    }
+    function notifyDone() {
+      onDoneCbs.forEach((cb) => cb())
+    }
+    function notifyError(detail: string) {
+      onErrorCbs.forEach((cb) => cb(detail))
+    }
+
+    let started = false
+    let settled = false
+
+    const startTime = async () => {
+      if (started) return
+      started = true
+      ws.send(
+        JSON.stringify({
+          type: 'start',
+          token,
+          question,
+          notebook_id: notebookId,
+          ...(topK !== undefined ? { top_k: topK } : {}),
+          ...(minSimilarity !== undefined ? { min_similarity: minSimilarity } : {}),
+        }),
+      )
+    }
+
+    ws.onopen = () => {
+      // Send the start message once the socket is open.
+      void startTime()
+    }
+
+    ws.onmessage = (event) => {
+      let msg: WSStreamMessage
+      try {
+        msg = JSON.parse(event.data) as WSStreamMessage
+      } catch {
+        notifyError('Invalid response from server.')
+        return
+      }
+      if (msg.type === 'error') {
+        notifyError(msg.detail)
+        // Error messages are followed by a complete message; do not reject
+        // yet — the caller may still want to know the session ended.
+      }
+      notifyMessage(msg)
+      if (msg.type === 'complete') {
+        notifyDone()
+        ws.onmessage = null
+        ws.onclose = null
+        ws.close()
+      }
+    }
+
+    ws.onerror = () => {
+      if (!settled) {
+        settled = true
+        reject(new ApiError(0, 'Unable to connect to the streaming endpoint. Please make sure the backend is running.'))
+      }
+    }
+
+    ws.onclose = () => {
+      if (!settled) {
+        settled = true
+        if (!started) {
+          reject(new ApiError(0, 'Unable to connect to the streaming endpoint. Please make sure the backend is running.'))
+        }
+      }
+    }
+
+    // Give the connection a moment to fail fast if the server is down.
+    setTimeout(() => {
+      if (!started && !settled) {
+        settled = true
+        ws.close()
+        reject(new ApiError(0, 'Unable to connect to the streaming endpoint. Please make sure the backend is running.'))
+      }
+    }, 5000)
+
+    resolve({
+      close: () => {
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close()
+        }
+      },
+      onMessage: (cb) => onMessageCbs.push(cb),
+      onDone: (cb) => onDoneCbs.push(cb),
+      onError: (cb) => onErrorCbs.push(cb),
+    })
   })
 }
 

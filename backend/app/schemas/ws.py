@@ -52,6 +52,22 @@ class WSStartMessage(BaseModel):
     )
 
 
+class WSChunkSource(BaseModel):
+    """One retrieved chunk returned as part of the WS context message.
+
+    This is the schema the WS streaming handler emits for each source, and the
+    schema the WS tests use to build deterministic stubbed retrieval results.
+    """
+
+    id: int = Field(..., description="Internal chunk id")
+    document_id: str = Field(..., description="Document this chunk came from")
+    chunk_index: int = Field(..., description="Chunk index within the document")
+    similarity_score: float = Field(
+        ..., ge=-1.0, le=1.0, description="Cosine similarity to the question"
+    )
+    content: str = Field(..., description="Chunk text used as grounding context")
+
+
 class WSContextMessage(BaseModel):
     """Server -> client: the retrieved context/source information used for the answer."""
 
@@ -80,7 +96,6 @@ class WSCompleteMessage(BaseModel):
     """Server -> client: streaming session completed."""
 
     type: str = Field(default="complete", description="Message type identifier")
-
 
 
 class WSErrorMessage(BaseModel):

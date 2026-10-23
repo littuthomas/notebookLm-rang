@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import logging
 from typing import AsyncIterator
 
@@ -34,9 +36,16 @@ class WSRAGOrchestrator:
     duplicating the vector-search or Gemini setup.
     """
 
-    def __init__(self, db: Session, generation_service: GenerationService | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        retrieval_service: RetrievalService | None = None,
+        generation_service: GenerationService | None = None,
+    ) -> None:
         self.db = db
-        self.retrieval_service = create_retrieval_service(db)
+        self.retrieval_service = (
+            retrieval_service or create_retrieval_service(db)
+        )
         self.generation_service = generation_service or get_generation_service()
 
     async def handle_question(
@@ -89,8 +98,14 @@ class WSRAGOrchestrator:
             return
 
         # --- Retrieval (reused) ---
+        # RetrievalService.retrieve() is synchronous (a blocking Gemini
+        # Embedding HTTP call + pgvector DB query). Run it in a worker thread
+        # so the event loop stays responsive: while retrieval runs, other
+        # WebSocket streams and HTTP requests no longer freeze. Async
+        # retrieval surfaces (test stubs) are awaited on the loop instead.
         try:
-            chunks = self.retrieval_service.retrieve(
+            retrieve = self.retrieval_service.retrieve
+            retrieve_kwargs = dict(
                 question=question,
                 top_k=top_k or settings.RAG_TOP_K,
                 min_similarity=(
@@ -101,6 +116,10 @@ class WSRAGOrchestrator:
                 user_id=user_id,
                 notebook_id=notebook_id,
             )
+            if inspect.iscoroutinefunction(retrieve):
+                chunks = await retrieve(**retrieve_kwargs)
+            else:
+                chunks = await asyncio.to_thread(retrieve, **retrieve_kwargs)
         except ValueError as e:
             msg = WSErrorMessage(detail=f"Invalid question: {e}").model_dump()
             try:
@@ -156,6 +175,15 @@ class WSRAGOrchestrator:
         # Reuse the same source-mapping logic as POST /api/chat so the
         # response shape is consistent (chunk_id, snippet, etc.).
         from app.services.rag import RAGService
+
+        # ``chunks`` is the value returned by ``self.retrieval_service.retrieve(...)``.
+        # If the WS tests mutate ``create_retrieval_service`` itself into the stub
+        # instance, that stub's ``retrieve()`` returns a list, so ``chunks`` is already
+        # materialized and this comprehension is fine. If, however, some other path
+        # accidentally handed back an unawaited coroutine, guard against it explicitly so
+        # the failure is a clear assertion instead of a cryptic streaming crash.
+        if callable(getattr(chunks, "send", None)) or getattr(chunks, "__await__", None) is not None:
+            raise RuntimeError("WS retrieval returned a coroutine/awaitable, not a list of chunks")
 
         msg = WSContextMessage(
             found_context=True,

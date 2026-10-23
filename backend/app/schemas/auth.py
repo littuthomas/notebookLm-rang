@@ -25,6 +25,13 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class RefreshTokenResponse(BaseModel):
+    """Minimal response returned after login/refresh to keep the cookie set."""
+
+    access_token: str
+    token_type: str = "bearer"
+
+
 class UserResponse(BaseModel):
     """Response schema for user data (never includes password)."""
 

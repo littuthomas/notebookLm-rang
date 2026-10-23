@@ -162,16 +162,20 @@ async def upload_document(
     # exceeded so an oversized upload is aborted before it fills memory.
     contents = bytearray()
     chunk_buffer_size = 1024 * 1024
+    is_over_size = False
     while True:
         buf = await file.read(chunk_buffer_size)
         if not buf:
             break
         contents.extend(buf)
         if len(contents) > MAX_UPLOAD_SIZE:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"File too large. Max size: {settings.MAX_UPLOAD_SIZE_MB} MB",
-            )
+            is_over_size = True
+            break
+    if is_over_size:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Max size: {settings.MAX_UPLOAD_SIZE_MB} MB",
+        )
     if len(contents) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -10,8 +10,8 @@ import {
 } from 'lucide-react'
 import Button from '../components/common/Button'
 import EmptyState from '../components/common/EmptyState'
-import { askQuestion, listNotebooks, saveAnswer } from '../services/api'
-import type { ChatResponse, Notebook } from '../services/api'
+import { listNotebooks, saveAnswer, streamQuestion } from '../services/api'
+import type { ChatResponse, Notebook, WSStreamMessage } from '../services/api'
 
 interface ChatMsg {
   role: 'user' | 'assistant'
@@ -27,8 +27,10 @@ export default function Chat() {
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
   const [thinking, setThinking] = useState(false)
+  const [streamingModel, setStreamingModel] = useState<string | null>(null)
   const [savedIdx, setSavedIdx] = useState<Set<number>>(new Set())
   const endRef = useRef<HTMLDivElement>(null)
+  const wsRef = useRef<ReturnType<typeof streamQuestion> | null>(null)
 
   // Notebooks are independent knowledge spaces, so every question must pick
   // which one to answer from.
@@ -41,15 +43,25 @@ export default function Chat() {
       .catch(() => setNotebooks([]))
   }, [])
 
+  useEffect(() => {
+    return () => {
+      wsRef.current?.close()
+    }
+  }, [])
+
   const selected = notebooks.find((n) => n.id === selectedId) ?? null
 
   function selectNotebook(id: number | null) {
+    wsRef.current?.close()
+    wsRef.current = null
     setSelectedId(id)
     // Changing notebooks must clear the old notebook's chat + sources so no
     // retrieval context or conversation leaks across notebooks.
     setMessages([])
     setSavedIdx(new Set())
     setInput('')
+    setThinking(false)
+    setStreamingModel(null)
   }
 
   const scrollDown = () => requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }))
@@ -59,20 +71,83 @@ export default function Chat() {
     setMessages((prev) => [...prev, { role: 'user', text: question }])
     setInput('')
     setThinking(true)
+    setStreamingModel(null)
     scrollDown()
+    let ws: ReturnType<typeof streamQuestion> | null = null
     try {
-      const res = await askQuestion(question, selectedId)
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', text: res.answer, sources: res.sources, foundContext: res.found_context, model: res.model },
-      ])
+      ws = await streamQuestion(question, selectedId)
+      wsRef.current = ws
+      let fullAnswer = ''
+      let receivedContext = false
+      let foundContext = false
+      let receivedModel = false
+      ws.onMessage((msg: WSStreamMessage) => {
+        if (msg.type === 'context') {
+          receivedContext = true
+          foundContext = msg.found_context
+          if (msg.found_context && msg.sources.length > 0) {
+            setMessages((prev) => {
+              const next = [...prev]
+              const last = next[next.length - 1]
+              if (last && last.role === 'assistant' && last.text === '') {
+                next[next.length - 1] = { ...last, sources: msg.sources }
+              }
+              return next
+            })
+          }
+        } else if (msg.type === 'answer_chunk') {
+          fullAnswer += msg.chunk
+          setMessages((prev) => {
+            const next = [...prev]
+            const last = next[next.length - 1]
+            if (last && last.role === 'assistant') {
+              next[next.length - 1] = { ...last, text: last.text + msg.chunk }
+            }
+            return next
+          })
+          scrollDown()
+        } else if (msg.type === 'error') {
+          setMessages((prev) => [
+            ...prev,
+            { role: 'assistant', text: msg.detail, foundContext: false },
+          ])
+          setThinking(false)
+          scrollDown()
+        }
+      })
+      ws.onDone(() => {
+        setThinking(false)
+        if (!receivedContext) {
+          foundContext = false
+        }
+        if (fullAnswer) {
+          setMessages((prev) => {
+            const next = [...prev]
+            const last = next[next.length - 1]
+            if (last && last.role === 'assistant' && last.text === '') {
+              next[next.length - 1] = { ...last, text: fullAnswer, foundContext, sources: last.sources }
+            }
+            return next
+          })
+        }
+        wsRef.current = null
+        scrollDown()
+      })
+      ws.onError((detail) => {
+        setThinking(false)
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', text: detail || 'The AI request failed. Please try again.', foundContext: false },
+        ])
+        wsRef.current = null
+        scrollDown()
+      })
     } catch (e) {
+      setThinking(false)
       setMessages((prev) => [
         ...prev,
         { role: 'assistant', text: e instanceof Error ? e.message : 'The AI request failed. Please try again.', foundContext: false },
       ])
-    } finally {
-      setThinking(false)
       scrollDown()
     }
   }
@@ -168,30 +243,35 @@ export default function Chat() {
                 )}
 
                 {m.role === 'assistant' && i >= 1 && (
-                  <div className="flex gap-3 mt-2.5">
-                    <button
-                      type="button"
-                      onClick={() => void navigator.clipboard.writeText(m.text)}
-                      className="text-xs text-muted hover:text-ink inline-flex items-center gap-1 transition-colors"
-                    >
-                      <ClipboardCopy size={12} aria-hidden="true" /> Copy
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSave(i)}
-                      disabled={savedIdx.has(i)}
-                      className="text-xs text-muted hover:text-lavender-deep inline-flex items-center gap-1 transition-colors disabled:text-mint disabled:hover:text-mint"
-                    >
-                      <BookmarkPlus size={12} aria-hidden="true" /> {savedIdx.has(i) ? 'Saved' : 'Save answer'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void ask(messages[i - 1]?.text ?? '')}
-                      className="text-xs text-muted hover:text-ink inline-flex items-center gap-1 transition-colors"
-                    >
-                      <RotateCcw size={12} aria-hidden="true" /> Regenerate
-                    </button>
-                  </div>
+                  <>
+                    {m.model && (
+                      <p className="text-[10px] text-muted mt-1 font-mono">{m.model}</p>
+                    )}
+                    <div className="flex gap-3 mt-2.5">
+                      <button
+                        type="button"
+                        onClick={() => void navigator.clipboard.writeText(m.text)}
+                        className="text-xs text-muted hover:text-ink inline-flex items-center gap-1 transition-colors"
+                      >
+                        <ClipboardCopy size={12} aria-hidden="true" /> Copy
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSave(i)}
+                        disabled={savedIdx.has(i)}
+                        className="text-xs text-muted hover:text-lavender-deep inline-flex items-center gap-1 transition-colors disabled:text-mint disabled:hover:text-mint"
+                      >
+                        <BookmarkPlus size={12} aria-hidden="true" /> {savedIdx.has(i) ? 'Saved' : 'Save answer'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void ask(messages[i - 1]?.text ?? '')}
+                        className="text-xs text-muted hover:text-ink inline-flex items-center gap-1 transition-colors"
+                      >
+                        <RotateCcw size={12} aria-hidden="true" /> Regenerate
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
             </div>

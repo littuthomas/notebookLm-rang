@@ -26,7 +26,7 @@ class Settings:
         # Gemini LLM (answer generation) - reuses GEMINI_API_KEY above
         self.GEMINI_LLM_MODEL: str = os.environ.get("GEMINI_LLM_MODEL", "gemini-3.8-flash")
         self.GEMINI_LLM_TEMPERATURE: float = float(os.environ.get("GEMINI_LLM_TEMPERATURE", "0.2"))
-        self.GEMINI_LLM_MAX_OUTPUT_TOKENS: int = int(os.environ.get("GEMINI_LLM_MAX_OUTPUT_TOKENS", "1024"))
+        self.GEMINI_LLM_MAX_OUTPUT_TOKENS: int = int(os.environ.get("GEMINI_LLM_MAX_OUTPUT_TOKENS", "4096"))
 
         # Retry policy for TRANSIENT Gemini generation errors (e.g. 503
         # "UNAVAILABLE - high demand", 429 rate limits, 500 internal errors).
@@ -40,11 +40,13 @@ class Settings:
             os.environ.get("GEMINI_LLM_RETRY_MAX_DELAY", "8.0")
         )
 
-        # Nemotron Ultra fallback LLM (generation ONLY; used when Gemini fails).
+        # Nemotron fallback LLM (generation ONLY; used when Gemini fails).
         # Routed through OpenRouter's OpenAI-compatible API using the
         # OPENROUTER_API_KEY defined below.
+        # A smaller, faster model keeps the fallback responsive; the 550B
+        # Nemotron Ultra is still available by setting this env var explicitly.
         self.OPENROUTER_LLM_MODEL: str = os.environ.get(
-            "OPENROUTER_LLM_MODEL", "nvidia/nemotron-3-ultra-550b-a55b"
+            "OPENROUTER_LLM_MODEL", "meta-llama/llama-3.3-70b-instruct"
         )
         self.OPENROUTER_LLM_BASE_URL: str = os.environ.get(
             "OPENROUTER_LLM_BASE_URL", "https://openrouter.ai/api/v1"
@@ -59,9 +61,30 @@ class Settings:
         self.RAG_MAX_CONTEXT_CHARS: int = int(os.environ.get("RAG_MAX_CONTEXT_CHARS", "12000"))
 
         # JWT Authentication
+        # IMPORTANT: never ship with the default placeholder. Generate a random
+        # secret before deployment and set it via the environment (or .env).
+        # Backend startup logs a warning when the placeholder is still in use.
         self.JWT_SECRET_KEY: str = os.environ.get("JWT_SECRET_KEY", "changeme-generate-a-real-secret")
         self.JWT_ALGORITHM: str = os.environ.get("JWT_ALGORITHM", "HS256")
         self.ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+
+        # CORS (frontend/ingestion UI) — must be defined before refresh-cookie
+        # defaults that depend on dev-vs-production heuristics.
+        self.CORS_ORIGINS: str = os.environ.get("CORS_ORIGINS", "http://localhost:5173")
+
+        # Secure refresh flow (HttpOnly cookie + server-tracked rotation).
+        # The refresh cookie lives much longer than the access token and is
+        # used only to obtain a new access token when the current one expires.
+        self.REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+        self.REFRESH_COOKIE_NAME: str = os.environ.get("REFRESH_COOKIE_NAME", "rag-refresh")
+        self.REFRESH_COOKIE_SECURE: bool = os.environ.get("REFRESH_COOKIE_SECURE", str(self._cookie_bool("REFRESH_COOKIE_SECURE", not self._is_dev))).strip().lower() in ("1", "true", "yes", "on")
+        self.REFRESH_COOKIE_SAME_SITE: str = os.environ.get("REFRESH_COOKIE_SAME_SITE", "Lax")
+
+        # Derived cookie config for the browser: when running over HTTPS the
+        # only way to send a Secure cookie is to require it, so dev defaults
+        # to False and production defaults to True. Local HTTP dev only works
+        # with Secure=False (the dev server listens on plain HTTP).
+        self.REFRESH_COOKIE_DOMAIN: str = os.environ.get("REFRESH_COOKIE_DOMAIN", "")
 
         # OpenRouter API key (Nemotron fallback LLM; also an optional embedding
         # backend when EMBEDDING_MODEL=openrouter)
@@ -79,9 +102,6 @@ class Settings:
 
         # Retrieval (ingestion-side alias for RAG_TOP_K)
         self.TOP_K: int = int(os.environ.get("TOP_K", "5"))
-
-        # CORS (frontend/ingestion UI)
-        self.CORS_ORIGINS: str = os.environ.get("CORS_ORIGINS", "http://localhost:5173")
 
         # Application
         self.APP_HOST: str = os.environ.get("APP_HOST", "0.0.0.0")
@@ -107,6 +127,20 @@ class Settings:
     # pgvector column and our retrieval pipeline. gemini-embedding-001 and
     # GOOGLE_EMBEDDING_MODEL are intentionally NOT adopted.
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cookie_bool(env_name: str, dev_default: bool) -> bool:
+        """Resolve a boolean cookie-security setting, defaulting to dev behavior."""
+        raw = os.environ.get(env_name, "").strip().lower()
+        if raw == "":
+            return dev_default
+        return raw in ("1", "true", "yes", "on")
+
+    @property
+    def _is_dev(self) -> bool:
+        """Heuristic: treat plain-HTTP localhost/127.0.0.1 as development."""
+        origins = [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+        return any(o.startswith("http://localhost") or o.startswith("http://127.0.0.1") for o in origins)
 
     @property
     def GOOGLE_API_KEY(self) -> str:

@@ -6,6 +6,7 @@ Document metadata rows are created directly through the DB session because
 the full upload pipeline requires the Gemini embedding API.
 """
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -35,6 +36,8 @@ def insert_document(db_session, notebook_id, **overrides):
         page_count=3,
         chunk_count=5,
         status="ready",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     defaults.update(overrides)
     doc = DocumentMeta(**defaults)

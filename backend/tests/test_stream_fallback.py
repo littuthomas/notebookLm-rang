@@ -14,11 +14,14 @@ Behaviour under test (no network, no DB — provider streams are faked):
 """
 import pytest
 
+from app.core.config import get_settings
 from app.services.generation import (
     GENERATION_UNAVAILABLE_MESSAGE,
     STREAM_FLUSH_THRESHOLD_CHARS,
     GenerationService,
 )
+
+settings = get_settings()
 
 
 # ------------------------------------------------------------------ fakes
@@ -83,7 +86,7 @@ def test_primary_crash_before_first_token_falls_back():
     out = asyncio_run(collect(svc.stream_answer("q", "context")))
     assert out == "Nemotron answer [Source 1]"  # clean, single-model output
     assert fakes.fallback_called is True
-    assert svc.last_model_used == "nvidia/nemotron-3-ultra-550b-a55b"
+    assert svc.last_model_used == settings.OPENROUTER_LLM_MODEL
 
 
 def test_partial_primary_below_threshold_is_discarded_then_fallback():
@@ -102,7 +105,7 @@ def test_partial_primary_below_threshold_is_discarded_then_fallback():
     assert out == "Clean fallback answer."
     assert "Paris" not in out  # no stitched output from two models
     assert fakes.fallback_called is True
-    assert svc.last_model_used == "nvidia/nemotron-3-ultra-550b-a55b"
+    assert svc.last_model_used == settings.OPENROUTER_LLM_MODEL
 
 
 def test_partial_primary_crossing_threshold_then_crash_no_fallback():

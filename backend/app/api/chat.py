@@ -1,10 +1,12 @@
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.config import get_settings
 from app.models.user import User
 from app.schemas.chat import ChatRequest, ChatResponse, ChatSource
 from app.services.auth import get_current_user
@@ -12,6 +14,18 @@ from app.services.chat_history import create_chat_history_service
 from app.services.rag import create_rag_service
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
+
+# Dedicated thread pool for the (blocking) RAG pipeline so that transient
+# Gemini retries and long generation calls do not starve the default executor
+# or stall other requests/WebSocket handlers. Sized for concurrent chat load:
+# each in-flight request holds one thread for up to a few seconds, so we allow
+# enough concurrent threads for typical traffic while still capping total
+# parallelism to avoid melting the process under extreme load.
+RAG_EXECUTOR = ThreadPoolExecutor(
+    max_workers=settings.GEMINI_LLM_MAX_RETRIES * 8 + 8,
+    thread_name_prefix="rag-",
+)
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -84,7 +98,7 @@ async def chat(
         # The session is only used sequentially, so cross-thread use is safe.
         result = await asyncio.to_thread(
             rag_service.answer_question,
-            question=request.question,
+            request.question,
             top_k=request.top_k,
             min_similarity=request.min_similarity,
             user_id=current_user.id,

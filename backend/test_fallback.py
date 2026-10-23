@@ -375,4 +375,7 @@ print("\n" + "=" * 60)
 print(f"RESULTS: {PASS} passed, {FAIL} failed out of {PASS + FAIL} assertions")
 print("=" * 60)
 
-sys.exit(0 if FAIL == 0 else 1)
+if FAIL:
+    sys.exit(1)
+else:
+    sys.exit(0)

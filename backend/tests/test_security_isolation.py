@@ -28,9 +28,6 @@ SUPPORTED_TEXT = (
     "France is a country in western Europe."
 )
 
-FOREIGN_SENTINEL = "TOP-SECRET-USER-B-CONTENT-zqxwce123"
-
-
 def create_notebook(client, headers, *, name="Security test notebook") -> dict:
     """Create an owned notebook and return its API representation."""
     r = client.post("/api/notebooks", json={"name": name}, headers=headers)
@@ -78,7 +75,7 @@ class FakeProcessor:
             }
 
         if "user-b" in filename:
-            body = FOREIGN_SENTINEL
+            body = "TOP-SECRET-USER-B-CONTENT-zqxwce123"
         else:
             body = content
         embedding = get_embedding_service().embed(body)
@@ -228,7 +225,7 @@ def test_other_user_retrieval_never_returns_foreign_chunks(client, user_a, user_
     )
     assert q.status_code == 200
     all_text = " ".join(c["content"] for c in q.json()["retrieved_chunks"])
-    assert FOREIGN_SENTINEL not in all_text
+    assert "TOP-SECRET-USER-B-CONTENT-zqxwce123" not in all_text
     assert "Eiffel Tower" not in all_text
 
 
@@ -255,7 +252,7 @@ def test_owner_retrieval_returns_only_own_chunks(client, user_a, user_b, fake_pr
     body = q.json()
     # A may have uploaded several docs during earlier tests in this session;
     # the isolation property being tested: NEVER any of B's sentinel content.
-    assert all(FOREIGN_SENTINEL not in c["content"] for c in body["retrieved_chunks"])
+    assert all("TOP-SECRET-USER-B-CONTENT-zqxwce123" not in c["content"] for c in body["retrieved_chunks"])
 
     # And vice versa (B never sees A's text).
     q2 = client.post(
@@ -289,7 +286,7 @@ def test_chat_isolation_no_context_for_other_user(client, user_a, user_b, fake_p
     assert r.status_code == 200
     body = r.json()
     # No LLM call, no foreign sources, no foreign text in the answer.
-    assert all(FOREIGN_SENTINEL not in (s.get("snippet") or "") for s in body["sources"])
+    assert all("TOP-SECRET-USER-B-CONTENT-zqxwce123" not in (s.get("snippet") or "") for s in body["sources"])
     assert all("Eiffel" not in (s.get("snippet") or "") for s in body["sources"])
 
 
@@ -306,7 +303,7 @@ def test_chat_rejects_foreign_notebook_scoping(client, user_a, user_b, db):
 def test_other_user_document_metadata_is_404(client, user_a, user_b, fake_processor, db):
     upload_file(client, user_a["headers"], filename="meta-secret.txt")
     r = client.get("/api/documents", headers=user_b["headers"])
-    assert all(FOREIGN_SENTINEL not in d["filename"] for d in r.json()["documents"])
+    assert all("TOP-SECRET-USER-B-CONTENT-zqxwce123" not in d["filename"] for d in r.json()["documents"])
     # uuid-random document ids of other users are never listed
     assert all("a-secret" not in d["filename"] for d in r.json()["documents"])
 
@@ -317,7 +314,7 @@ def test_legacy_listing_is_user_scoped(client, user_a, user_b, fake_processor, d
     r = client.get("/api/documents/legacy", headers=user_b["headers"])
     assert r.status_code == 200
     # B sees only B's documents (none), never A's.
-    assert all(FOREIGN_SENTINEL not in str(d) for d in r.json()["documents"])
+    assert all("TOP-SECRET-USER-B-CONTENT-zqxwce123" not in str(d) for d in r.json()["documents"])
 
     r2 = client.get("/api/documents/legacy", headers=user_a["headers"])
     ids = [d["document_id"] for d in r2.json()["documents"]]
@@ -358,10 +355,12 @@ def test_wrong_mime_rejected(client, user_a, fake_processor):
     assert r.status_code == 400
 
 
-def test_oversized_upload_rejected(client, user_a):
+def test_oversized_upload_rejected(client, user_a, db):
     from app.api import documents as documents_module
 
-    with patch.object(documents_module, "MAX_UPLOAD_SIZE", 1024):
+    # Patch the module-level size limit (bytes) to a small value so the test
+    # payload exceeds it without sending a multi-megabyte request.
+    with patch.object(documents_module, "MAX_UPLOAD_SIZE", 100):
         big = "x" * 5000
         r = client.post(
             "/api/documents/upload",
@@ -415,7 +414,7 @@ def test_delete_document_removes_chunks_and_embeddings(client, user_a, fake_proc
         },
         headers=user_a["headers"],
     )
-    assert all(FOREIGN_SENTINEL not in c["content"] for c in q.json()["retrieved_chunks"])
+    assert all("TOP-SECRET-USER-B-CONTENT-zqxwce123" not in c["content"] for c in q.json()["retrieved_chunks"])
 
 
 def test_other_user_cannot_delete_a_document(client, user_a, user_b, fake_processor, db):

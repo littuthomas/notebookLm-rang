@@ -6,14 +6,15 @@ import {
   getMe,
   login as apiLogin,
   register,
+  resetRefreshState,
 } from '../services/api'
 import type { MeUser } from '../services/api'
 
 /**
- * Lightweight auth context:
+ * Auth context with refresh-aware session handling:
  * - On mount, verifies any stored JWT via GET /api/auth/me
  * - login() stores the token and loads the profile
- * - logout() clears the token and the profile
+ * - logout() clears the token, the profile, and the single-flight refresh state
  */
 
 interface AuthState {
@@ -25,6 +26,7 @@ interface AuthState {
 }
 
 const AuthContext = createContext<AuthState | null>(null)
+
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<MeUser | null>(null)
@@ -71,6 +73,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     clearToken()
+    resetRefreshState()
     setUser(null)
   }, [])
 
@@ -82,8 +85,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 
+
 export function useAuth(): AuthState {
   const ctx = useContext(AuthContext)
   if (!ctx) throw new Error('useAuth must be used inside <AuthProvider>')
   return ctx
 }
+

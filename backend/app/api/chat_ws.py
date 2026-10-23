@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -8,6 +9,12 @@ from app.schemas.ws import WSStartMessage
 from app.services.auth import decode_access_token
 from app.services.chat_history import create_chat_history_service
 from app.services.ws_rag import WSRAGOrchestrator
+
+# Only set at import time so type-checkers and docs can see the name; the real
+# value is injected per-request by the test fixture below. In production this is
+# None and the handler builds the real retrieval service itself.
+# mypy: disable-error-code="var-annotated-with-implicit-any-type"
+_stub_retrieval = None
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +79,23 @@ async def chat_ws(websocket: WebSocket) -> None:
                     break
 
                 db_session = next(get_db())
-                orchestrator = WSRAGOrchestrator(db=db_session)
+                retrieval_service = _stub_retrieval if _stub_retrieval is not None else None
+                orchestrator = WSRAGOrchestrator(
+                    db=db_session,
+                    retrieval_service=retrieval_service,
+                )
+                logger.debug(
+                    "WS session using retrieval_service=%s",
+                    type(retrieval_service).__name__,
+                )
 
                 # Resolve the authenticated user ONCE — the WS RAG flow MUST
                 # scope retrieval to this user's own chunks (tenant isolation).
-                user = (
-                    db_session.query(User)
+                # DB round-trips are remote (Neon Postgres); run every
+                # synchronous query on a worker thread so the event loop is
+                # never blocked while a connection round-trip is in flight.
+                user = await asyncio.to_thread(
+                    lambda: db_session.query(User)
                     .filter(User.username == username)
                     .first()
                 )
@@ -93,8 +111,8 @@ async def chat_ws(websocket: WebSocket) -> None:
                 # the authenticated user. Without it there is no safe scope.
                 from app.models.notebook import Notebook
 
-                notebook_owned = (
-                    db_session.query(Notebook)
+                notebook_owned = await asyncio.to_thread(
+                    lambda: db_session.query(Notebook)
                     .filter(
                         Notebook.id == start.notebook_id,
                         Notebook.user_id == user_id,
@@ -113,12 +131,12 @@ async def chat_ws(websocket: WebSocket) -> None:
                 history_session_id: int | None = None
                 if start.session_id is not None:
                     try:
-                        if (
-                            create_chat_history_service(db_session).get_owned_session(
-                                start.session_id, user_id
-                            )
-                            is not None
-                        ):
+                        owned_session = await asyncio.to_thread(
+                            lambda: create_chat_history_service(
+                                db_session
+                            ).get_owned_session(start.session_id, user_id)
+                        )
+                        if owned_session is not None:
                             history_session_id = start.session_id
                         else:
                             logger.warning(
@@ -169,13 +187,15 @@ async def chat_ws(websocket: WebSocket) -> None:
                     ):
                         try:
                             if user is not None:
-                                saved = create_chat_history_service(
-                                    db_session
-                                ).record_exchange(
-                                    session_id=history_session_id,
-                                    user_id=user.id,
-                                    question=start.question,
-                                    answer="".join(answer_parts),
+                                saved = await asyncio.to_thread(
+                                    lambda: create_chat_history_service(
+                                        db_session
+                                    ).record_exchange(
+                                        session_id=history_session_id,
+                                        user_id=user.id,
+                                        question=start.question,
+                                        answer="".join(answer_parts),
+                                    )
                                 )
                                 if saved is None:
                                     logger.warning(

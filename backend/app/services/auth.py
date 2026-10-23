@@ -1,14 +1,18 @@
+import hashlib
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.models.refresh_token import RefreshToken
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -70,6 +74,104 @@ def decode_access_token(token: str) -> dict:
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         ) from e
+
+
+# --- Refresh Token (opaque, DB-tracked) ---
+
+
+def _refresh_token_hash(raw: str) -> str:
+    """One-way hash of the refresh token, stored in the DB row.
+
+    The raw value is never persisted: only this hash is used for lookup,
+    revocation and reuse detection.
+    """
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def create_refresh_token(user_id: int) -> tuple[str, RefreshToken]:
+    """Create a new refresh token for ``user_id``.
+
+    Returns the raw token value (to be set in an HttpOnly cookie) and the
+    corresponding ORM row.  The raw token must be treated as secret.
+    """
+    raw = secrets.token_urlsafe(48)
+    token_hash = _refresh_token_hash(raw)
+
+    issued_at = datetime.now(timezone.utc)
+    expires_at = issued_at + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+
+    row = RefreshToken(
+        token_hash=token_hash,
+        user_id=user_id,
+        issued_at=issued_at,
+        expires_at=expires_at,
+    )
+    return raw, row
+
+
+def lookup_refresh_token(raw: str, db: Session) -> RefreshToken | None:
+    """Return the refresh-token row for ``raw`` if it exists and is valid.
+
+    A token is valid when it exists, has not expired and has not been revoked.
+    """
+    token_hash = _refresh_token_hash(raw)
+    stmt = (
+        select(RefreshToken)
+        .where(RefreshToken.token_hash == token_hash)
+        .where(RefreshToken.user_id.isnot(None))
+    )
+    token = db.execute(stmt).scalars().first()
+    if token is None:
+        return None
+    return token if token.is_valid() else None
+
+
+def rotate_refresh_token(token: RefreshToken, db: Session) -> tuple[str, RefreshToken, RefreshToken]:
+    """Rotate ``token``: revoke it, issue a replacement, and return both.
+
+    This is the core rotation/revocation mechanism.
+
+    Returns:
+        (new_raw, new_row, old_revoked_row)
+    """
+    now = datetime.now(timezone.utc)
+
+    # Revoke the current (about-to-be-used) token so it cannot be reused.
+    token.revoked = True
+    token.issued_at = now
+    old = token
+
+    new_raw, new_row = create_refresh_token(user_id=token.user_id)
+    new_row.parent_id = old.id
+
+    db.add(new_row)
+    db.flush()
+    return new_raw, new_row, old
+
+
+def revoke_refresh_token(raw: str, db: Session) -> bool:
+    """Revoke a refresh token (logout). Returns True if a token was revoked."""
+    token = lookup_refresh_token(raw, db)
+    if token is None:
+        return False
+    token.revoked = True
+    db.flush()
+    return True
+
+
+def revoke_all_user_refresh_tokens(user_id: int, db: Session) -> int:
+    """Revoke every active refresh token for ``user_id"."""
+    count = (
+        db.query(RefreshToken)
+        .filter(
+            RefreshToken.user_id == user_id,
+            RefreshToken.revoked == False,
+            RefreshToken.expires_at > datetime.now(timezone.utc),
+        )
+        .update({"revoked": True})
+    )
+    db.flush()
+    return count
 
 
 # --- Authentication Dependency ---

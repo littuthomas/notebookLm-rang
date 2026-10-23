@@ -56,7 +56,10 @@ def test_engine():
     # server-side connections between clients, so SET leaks across engines.
     direct_url = url.replace("-pooler.", ".")
     sep = "&" if "?" in direct_url else "?"
-    schema_url = f"{direct_url}{sep}options=-csearch_path%3D{schema},public"
+    # options value must be URL-decoded for PostgreSQL (the %3D becomes =).
+    from urllib.parse import unquote
+    options_value = unquote(f"-csearch_path={schema},public")
+    schema_url = f"{direct_url}{sep}options={options_value}"
 
     # Point the app's global engine at the same test schema BEFORE app modules
     # are imported (env wins over backend/.env because load_dotenv never
